@@ -32,13 +32,15 @@ app.get('/', (req, res) => {
 // Rota para gerar token de conexão do Pluggy e salvar no Supabase
 app.get('/connect-token', async (req, res) => {
   try {
-    // Cria um novo usuário Pluggy
+    // 1. Cria um novo usuário no Pluggy
     const newUser = await pluggyClient.createUser();
 
-    // Agora sim, podemos gerar o connect token para esse usuário
+    console.log('Novo usuário Pluggy criado:', newUser);
+
+    // 2. Cria um connect token para o usuário recém-criado
     const connectToken = await pluggyClient.createConnectToken(newUser.id);
 
-    // Salvar no Supabase
+    // 3. Salva o pluggy_user_id no Supabase
     const { data, error } = await supabase
       .from('users')
       .insert([
@@ -53,15 +55,7 @@ app.get('/connect-token', async (req, res) => {
       console.log('Usuário salvo no Supabase:', data);
     }
 
-    res.json(connectToken);
-  } catch (error) {
-    console.error('Erro ao gerar connect token:', error);
-    res.status(500).json({ error: 'Erro ao gerar token de conexão' });
-  }
-});
-
-
-    // Retorna o token para o cliente
+    // 4. Retorna o token para o frontend
     res.json(connectToken);
   } catch (error) {
     console.error('Erro ao gerar connect token:', error);
