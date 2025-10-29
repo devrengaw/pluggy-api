@@ -14,7 +14,7 @@ app.use(express.json());
 // Healthcheck simples
 app.get("/api/create-link-token", async (req, res) => {
   try {
-    const response = await pluggyClient.connectTokens.create();
+    const response = await pluggyClient.createConnectToken();
     res.json(response);
   } catch (err) {
     console.error("Erro ao gerar connect token:", err);
