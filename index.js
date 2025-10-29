@@ -13,9 +13,13 @@ app.use(express.json());
 
 // Healthcheck simples
 app.get('/connect-token', async (req, res) => {
-  // ...
-  const connectToken = await pluggyClient.connect.createConnectToken(newUser.id);
-  res.json(connectToken);
+  try {
+    const token = await pluggyClient.connectTokens.create();
+    res.json(token);
+  } catch (error) {
+    console.error("Erro ao gerar connect token:", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 const port = process.env.PORT || 3000;
