@@ -14,7 +14,9 @@ app.use(bodyParser.json());
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// 🔹 Função utilitária para enviar mensagens ao Telegram
+// ============================================================
+// 🔧 FUNÇÕES UTILITÁRIAS
+// ============================================================
 async function sendMessage(chatId, text) {
   await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
     method: "POST",
@@ -23,26 +25,23 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// 🔹 Função para calcular saldo total
 async function calcularSaldo(chatId) {
   const { data, error } = await supabase
     .from("transacoes")
     .select("tipo, valor")
     .eq("chat_id", chatId);
-
   if (error || !data) return null;
-
-  const saldo = data.reduce((acc, item) => {
-    return acc + (item.tipo === "entrada" ? Number(item.valor) : -Number(item.valor));
-  }, 0);
-
+  const saldo = data.reduce(
+    (acc, item) =>
+      acc + (item.tipo === "entrada" ? Number(item.valor) : -Number(item.valor)),
+    0
+  );
   return saldo.toFixed(2);
 }
 
-// ============================
-// 💰 COMANDOS DO TELEGRAM
-// ============================
-
+// ============================================================
+// 💰 COMANDOS FINANCEIROS
+// ============================================================
 async function comandoEntrada(chatId, text) {
   const parts = text.split(" ");
   const valor = parts[1];
@@ -93,11 +92,8 @@ async function comandoSaida(chatId, text) {
 
 async function comandoSaldo(chatId) {
   const saldo = await calcularSaldo(chatId);
-  if (saldo === null) {
-    await sendMessage(chatId, "⚠️ Erro ao buscar saldo.");
-  } else {
-    await sendMessage(chatId, `📊 *Seu saldo atual é:*\nR$${saldo}`);
-  }
+  if (saldo === null) await sendMessage(chatId, "⚠️ Erro ao buscar saldo.");
+  else await sendMessage(chatId, `📊 *Seu saldo atual é:*\nR$${saldo}`);
 }
 
 async function comandoResumo(chatId) {
@@ -130,7 +126,7 @@ async function comandoResumo(chatId) {
 }
 
 async function comandoExtrato(chatId) {
-  const mesAtual = new Date().toISOString().slice(0, 7); // formato YYYY-MM
+  const mesAtual = new Date().toISOString().slice(0, 7);
   const { data, error } = await supabase
     .from("transacoes")
     .select("*")
@@ -139,7 +135,7 @@ async function comandoExtrato(chatId) {
     .lte("created_at", `${mesAtual}-31`);
 
   if (error || !data || data.length === 0) {
-    await sendMessage(chatId, "📭 Nenhuma transação registrada neste mês.");
+    await sendMessage(chatId, "📭 Nenhuma transação neste mês.");
     return;
   }
 
@@ -167,26 +163,110 @@ async function comandoExtrato(chatId) {
   );
 }
 
-async function comandoAjuda(chatId) {
-  await sendMessage(
-    chatId,
-    "🤖 *Comandos disponíveis:*\n\n" +
-      "💰 /entrada [valor] [descrição]\nEx: /entrada 100 salario\n\n" +
-      "💸 /saida [valor] [descrição] [método] [cartão]\nEx: /saida 50 mercado credito Nubank\n\n" +
-      "📊 /saldo → mostra seu saldo atual\n" +
-      "📅 /resumo → resumo dos últimos 7 dias\n" +
-      "📆 /extrato → extrato do mês atual\n" +
-      "ℹ️ /ajuda → lista todos os comandos"
-  );
+// ============================================================
+// 🗂️ CATEGORIAS, METAS, CARTÕES E ALERTAS
+// ============================================================
+async function comandoCategorias(chatId, text) {
+  const partes = text.split(" ");
+  const acao = partes[1];
+  const nome = partes.slice(2).join(" ");
+
+  if (acao === "adicionar") {
+    const { error } = await supabase.from("categorias").insert({
+      chat_id: chatId,
+      nome,
+    });
+    if (error) await sendMessage(chatId, "⚠️ Erro ao adicionar categoria.");
+    else await sendMessage(chatId, `✅ Categoria adicionada: *${nome}*`);
+  } else if (acao === "listar") {
+    const { data } = await supabase.from("categorias").select("nome").eq("chat_id", chatId);
+    if (!data || data.length === 0) {
+      await sendMessage(chatId, "📭 Nenhuma categoria cadastrada.");
+      return;
+    }
+    const lista = data.map((c) => `• ${c.nome}`).join("\n");
+    await sendMessage(chatId, `🗂️ *Suas categorias:*\n${lista}`);
+  } else if (acao === "remover") {
+    await supabase.from("categorias").delete().eq("chat_id", chatId).eq("nome", nome);
+    await sendMessage(chatId, `🗑️ Categoria removida: *${nome}*`);
+  } else {
+    await sendMessage(chatId, "🗂️ Use:\n/categoria adicionar [nome]\n/categoria listar\n/categoria remover [nome]");
+  }
 }
 
-// ============================
+async function comandoMetas(chatId, text) {
+  const partes = text.split(" ");
+  const acao = partes[1];
+  const categoria = partes[2];
+  const valor = partes[3];
+
+  if (acao === "definir") {
+    const { error } = await supabase.from("metas").insert({
+      chat_id: chatId,
+      categoria,
+      valor,
+    });
+    if (error) await sendMessage(chatId, "⚠️ Erro ao definir meta.");
+    else await sendMessage(chatId, `🎯 Meta definida: *${categoria}* — R$${valor}`);
+  } else if (acao === "listar") {
+    const { data } = await supabase.from("metas").select("categoria, valor").eq("chat_id", chatId);
+    if (!data || data.length === 0) {
+      await sendMessage(chatId, "📭 Nenhuma meta definida.");
+      return;
+    }
+    const lista = data.map((m) => `• ${m.categoria}: R$${m.valor}`).join("\n");
+    await sendMessage(chatId, `🎯 *Suas metas:*\n${lista}`);
+  } else {
+    await sendMessage(chatId, "🎯 Use:\n/meta definir [categoria] [valor]\n/meta listar");
+  }
+}
+
+async function comandoCartoes(chatId, text) {
+  const partes = text.split(" ");
+  const acao = partes[1];
+  const nome = partes[2];
+  const fechamento = partes[3];
+
+  if (acao === "adicionar") {
+    const { error } = await supabase.from("cartoes").insert({
+      chat_id: chatId,
+      nome,
+      fechamento,
+    });
+    if (error) await sendMessage(chatId, "⚠️ Erro ao adicionar cartão.");
+    else await sendMessage(chatId, `💳 Cartão adicionado: *${nome}* (fechamento dia ${fechamento})`);
+  } else if (acao === "listar") {
+    const { data } = await supabase.from("cartoes").select("nome, fechamento").eq("chat_id", chatId);
+    if (!data || data.length === 0) {
+      await sendMessage(chatId, "📭 Nenhum cartão cadastrado.");
+      return;
+    }
+    const lista = data.map((c) => `• ${c.nome} — fecha dia ${c.fechamento}`).join("\n");
+    await sendMessage(chatId, `💳 *Seus cartões:*\n${lista}`);
+  } else {
+    await sendMessage(chatId, "💳 Use:\n/cartao adicionar [nome] [dia]\n/cartao listar");
+  }
+}
+
+async function comandoAlertas(chatId, text) {
+  const acao = text.split(" ")[1];
+  if (acao === "ativar") {
+    await supabase.from("alertas").upsert({ chat_id: chatId, ativo: true });
+    await sendMessage(chatId, "🔔 Alertas automáticos ativados.");
+  } else if (acao === "desativar") {
+    await supabase.from("alertas").upsert({ chat_id: chatId, ativo: false });
+    await sendMessage(chatId, "🔕 Alertas automáticos desativados.");
+  } else {
+    await sendMessage(chatId, "🔔 Use:\n/alerta ativar\n/alerta desativar");
+  }
+}
+
+// ============================================================
 // 🤖 ROTEAMENTO DO TELEGRAM
-// ============================
+// ============================================================
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const message = req.body.message;
   if (!message) return res.sendStatus(200);
-
   const chatId = message.chat.id;
   const text = message.text?.trim().toLowerCase() || "";
 
@@ -196,36 +276,21 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     else if (text === "/saldo") await comandoSaldo(chatId);
     else if (text === "/resumo") await comandoResumo(chatId);
     else if (text === "/extrato") await comandoExtrato(chatId);
-    else if (text === "/ajuda") await comandoAjuda(chatId);
-    else
-      await sendMessage(
-        chatId,
-        "👋 Comando não reconhecido.\nUse /ajuda para ver a lista completa."
-      );
+    else if (text.startsWith("/categoria")) await comandoCategorias(chatId, text);
+    else if (text.startsWith("/meta")) await comandoMetas(chatId, text);
+    else if (text.startsWith("/cartao")) await comandoCartoes(chatId, text);
+    else if (text.startsWith("/alerta")) await comandoAlertas(chatId, text);
+    else await sendMessage(chatId, "👋 Use /ajuda para ver os comandos disponíveis.");
   } catch (err) {
-    console.error("Erro geral no webhook:", err);
+    console.error("Erro no webhook:", err);
     await sendMessage(chatId, "⚠️ Ocorreu um erro inesperado.");
   }
 
   res.sendStatus(200);
 });
 
-// ============================
-// 🚀 PLUGGY (ainda funcional)
-// ============================
-app.get("/connect-token", async (req, res) => {
-  try {
-    const connectToken = await pluggyClient.connect.create({
-      clientUserId: "user-" + Date.now().toString(),
-    });
-    res.json(connectToken);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================
-// 🌐 SERVER START
-// ============================
+// ============================================================
+// 🌐 SERVER
+// ============================================================
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`✅ Server online na porta ${port}`));
