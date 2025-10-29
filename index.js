@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import Pluggy from 'pluggy-sdk';
+import { PluggyClient } from 'pluggy-sdk'; // CORRETO AGORA
 import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 // Inicializa Pluggy
-const pluggyClient = new Pluggy.PluggyClient({
+const pluggyClient = new PluggyClient({
   clientId: process.env.PLUGGY_CLIENT_ID,
   clientSecret: process.env.PLUGGY_CLIENT_SECRET
 });
@@ -33,12 +33,12 @@ app.get('/', (req, res) => {
 app.get('/connect-token', async (req, res) => {
   try {
     // 1. Cria um novo usuário no Pluggy
-    const newUser = await pluggyClient.connect.createUser();
+    const newUser = await pluggyClient.createUser();
 
     console.log('Novo usuário Pluggy criado:', newUser);
 
     // 2. Cria um connect token para o usuário recém-criado
-    const connectToken = await pluggyClient.connect.createConnectToken(newUser.id);
+    const connectToken = await pluggyClient.createConnectToken(newUser.id);
 
     // 3. Salva o pluggy_user_id no Supabase
     const { data, error } = await supabase
@@ -63,8 +63,7 @@ app.get('/connect-token', async (req, res) => {
   }
 });
 
-
-// (Opcional) Rota para listar usuários (apenas para testes)
+// Rota para listar usuários (opcional para testes)
 app.get('/users', async (req, res) => {
   const { data, error } = await supabase.from('users').select('*');
   if (error) {
