@@ -25,7 +25,6 @@ app.get("/api/create-link-token", async (req, res) => {
   }
 });
 
-
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`✅ Server online na porta ${port}`);
