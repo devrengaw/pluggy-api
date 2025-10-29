@@ -14,7 +14,6 @@ app.use(express.json());
 // Healthcheck simples
 app.get("/api/create-link-token", async (req, res) => {
   try {
-    // Versão 0.3.x usa 'api.connectToken.create()'
     const response = await pluggyClient.api.connectToken.create();
     res.json(response);
   } catch (err) {
