@@ -14,7 +14,7 @@ app.use(express.json());
 // Healthcheck simples
 app.get('/connect-token', async (req, res) => {
   // ...
-  import pluggyClient from './pluggy.js'
+  const connectToken = await pluggyClient.connect.createConnectToken(newUser.id);
   res.json(connectToken);
 });
 
