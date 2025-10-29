@@ -11,12 +11,12 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-// ✅ Health check (Render usa pra saber se o servidor está vivo)
+// Healthcheck simples
 app.get("/", (req, res) => {
   res.json({ status: "ok" })
 })
 
-// ✅ Geração do token Pluggy
+// ✅ Endpoint que realmente gerou o token Pluggy com sucesso
 app.get("/connect-token", async (req, res) => {
   try {
     const connectToken = await pluggyClient.connect.create({
@@ -29,7 +29,7 @@ app.get("/connect-token", async (req, res) => {
   }
 })
 
-// ✅ Listar conexões (mock / exemplo — pode puxar do Supabase)
+// ✅ (opcional) Endpoint para listar conexões (caso precise)
 app.get("/connections", async (req, res) => {
   try {
     const { data, error } = await supabase.from("connections").select("*")
@@ -41,7 +41,7 @@ app.get("/connections", async (req, res) => {
   }
 })
 
-// ✅ Porta Render
+// Porta do Render
 const port = process.env.PORT || 10000
 app.listen(port, () => {
   console.log(`✅ Server online na porta ${port}`)
