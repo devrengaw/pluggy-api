@@ -17,11 +17,12 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // Endpoint para gerar o connect token do Pluggy (usado no front)
 app.get("/api/create-link-token", async (req, res) => {
   try {
-    const token = await pluggyClient.createConnectToken();
-    res.json(token); // { accessToken: '...' }
+    // Cria o token usando o método correto da versão 0.x
+    const response = await pluggyClient.connectToken.create();
+    res.json(response);
   } catch (err) {
     console.error("Erro ao gerar connect token:", err);
-    res.status(500).json({ error: "Falha ao gerar connect token" });
+    res.status(500).json({ error: err.message });
   }
 });
 
