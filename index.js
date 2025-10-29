@@ -12,27 +12,44 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Pluggy setup
+// Inicializa Pluggy
 const pluggyClient = new PluggyClient({
   clientId: process.env.PLUGGY_CLIENT_ID,
   clientSecret: process.env.PLUGGY_CLIENT_SECRET
 });
 
-// Supabase setup
+// Inicializa Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE
 );
 
-// Test route
+// Rota simples para teste
 app.get('/', (req, res) => {
   res.send('Pluggy API está no ar 🔌');
 });
 
-// Rota para gerar link de conexão com instituição bancária
+// Rota para gerar token de conexão do Pluggy e salvar no Supabase
 app.get('/connect-token', async (req, res) => {
   try {
     const connectToken = await pluggyClient.createConnectToken();
+
+    // Salva o pluggy_user_id na tabela 'users'
+    const { data, error } = await supabase
+      .from('users')
+      .insert([
+        {
+          pluggy_user_id: connectToken.userId
+        }
+      ]);
+
+    if (error) {
+      console.error('Erro ao salvar no Supabase:', error);
+    } else {
+      console.log('Usuário salvo no Supabase:', data);
+    }
+
+    // Retorna o token para o cliente
     res.json(connectToken);
   } catch (error) {
     console.error('Erro ao gerar connect token:', error);
@@ -40,9 +57,9 @@ app.get('/connect-token', async (req, res) => {
   }
 });
 
-// Exemplo de rota Supabase (pode ser ajustada depois)
-app.get('/usuarios', async (req, res) => {
-  const { data, error } = await supabase.from('usuarios').select('*');
+// (Opcional) Rota para listar usuários (apenas para testes)
+app.get('/users', async (req, res) => {
+  const { data, error } = await supabase.from('users').select('*');
   if (error) {
     res.status(500).json({ error });
   } else {
@@ -50,6 +67,7 @@ app.get('/usuarios', async (req, res) => {
   }
 });
 
+// Inicia o servidor
 app.listen(port, () => {
   console.log(`Servidor rodando na porta ${port}`);
 });
