@@ -19,14 +19,14 @@ app.get("/health", (req, res) => {
 // 🔑 Gera o connect token do Pluggy (usado pelo front para abrir o modal de conexão)
 app.get("/connect-token", async (req, res) => {
   try {
-    const connectToken = await pluggyClient.connectTokens.create();
-    res.json(connectToken);
+    // método correto da 0.78.x
+    const connectToken = await pluggyClient.createConnectToken()
+    res.json(connectToken)
   } catch (error) {
-    console.error("Erro ao gerar connect token:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Erro ao gerar connect token:", error)
+    res.status(500).json({ error: error.message })
   }
-});
-
+})
 // 💡 Exemplo de integração futura com Supabase (quando você salvar conexões ou usuários)
 app.get("/users", async (req, res) => {
   const { data, error } = await supabase.from("users").select("*");
