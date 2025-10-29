@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { PluggyClient } from 'pluggy-sdk'; // CORRETO AGORA
+import Pluggy from 'pluggy-sdk';
 import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
@@ -12,8 +12,8 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Inicializa Pluggy
-const pluggyClient = new PluggyClient({
+// Inicializa Pluggy com os dados do .env
+const pluggyClient = new Pluggy.Client({
   clientId: process.env.PLUGGY_CLIENT_ID,
   clientSecret: process.env.PLUGGY_CLIENT_SECRET
 });
@@ -24,52 +24,38 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE
 );
 
-// Rota simples para teste
+// Rota para verificar se está funcionando
 app.get('/', (req, res) => {
-  res.send('Pluggy API está no ar 🔌');
+  res.send('Pluggy API está rodando 🔌');
 });
 
-// Rota para gerar token de conexão do Pluggy e salvar no Supabase
+// Rota para criar usuário e gerar token
 app.get('/connect-token', async (req, res) => {
   try {
-    // 1. Cria um novo usuário no Pluggy
-    const newUser = await pluggyClient.createUser();
+    // Cria novo usuário Pluggy
+    const newUser = await pluggyClient.users.create();
 
-    console.log('Novo usuário Pluggy criado:', newUser);
+    console.log('Usuário criado:', newUser);
 
-    // 2. Cria um connect token para o usuário recém-criado
-    const connectToken = await pluggyClient.createConnectToken(newUser.id);
+    // Gera connect token
+    const tokenResponse = await pluggyClient.connect.createToken(newUser.id);
 
-    // 3. Salva o pluggy_user_id no Supabase
+    // Salva no Supabase
     const { data, error } = await supabase
       .from('users')
-      .insert([
-        {
-          pluggy_user_id: newUser.id
-        }
-      ]);
+      .insert([{ pluggy_user_id: newUser.id }]);
 
     if (error) {
       console.error('Erro ao salvar no Supabase:', error);
     } else {
-      console.log('Usuário salvo no Supabase:', data);
+      console.log('Usuário salvo:', data);
     }
 
-    // 4. Retorna o token para o frontend
-    res.json(connectToken);
+    res.json(tokenResponse); // Retorna token pro frontend
+
   } catch (error) {
     console.error('Erro ao gerar connect token:', error);
     res.status(500).json({ error: error.message || error });
-  }
-});
-
-// Rota para listar usuários (opcional para testes)
-app.get('/users', async (req, res) => {
-  const { data, error } = await supabase.from('users').select('*');
-  if (error) {
-    res.status(500).json({ error });
-  } else {
-    res.json(data);
   }
 });
 
