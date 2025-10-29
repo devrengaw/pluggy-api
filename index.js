@@ -12,9 +12,6 @@ app.use(cors());
 app.use(express.json());
 
 // Healthcheck simples
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-// Endpoint para gerar o connect token do Pluggy (usado no front)
 app.get("/api/create-link-token", async (req, res) => {
   try {
     const response = await pluggyClient.connectTokens.create();
