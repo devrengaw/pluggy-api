@@ -1,4 +1,3 @@
-// pluggy.js
 import { PluggyClient } from "pluggy-sdk";
 import dotenv from "dotenv";
 dotenv.config();
