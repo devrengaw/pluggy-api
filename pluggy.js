@@ -1,4 +1,4 @@
-import { PluggyClient } from "pluggy-sdk";
+import PluggyClient from "pluggy-sdk";
 import dotenv from "dotenv";
 dotenv.config();
 
