@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
-import fetch from "node-fetch";
 import pluggyClient from "./pluggy.js";
 import supabase from "./supabase.js";
 
