@@ -1,16 +1,17 @@
 {
-  "name": "pluggy-api",
+  "name": "financeiro-open-finance",
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
-"dependencies": {
-  "@supabase/supabase-js": "^2.39.5",
-  "cors": "^2.8.5",
-  "dotenv": "^16.3.1",
-  "express": "^4.18.2",
-  "pluggy-sdk": "^0.78.1"
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pluggy-sdk": "^2.2.0"
   }
 }
