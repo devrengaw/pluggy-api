@@ -1,6 +1,7 @@
 // pluggy.js
 import Pluggy from "pluggy-sdk"
 import dotenv from "dotenv"
+
 dotenv.config()
 
 const pluggyClient = new Pluggy.PluggyClient({
@@ -9,4 +10,3 @@ const pluggyClient = new Pluggy.PluggyClient({
 })
 
 export default pluggyClient
-
