@@ -1,20 +1,18 @@
 {
   "name": "pluggy-api",
   "version": "1.0.0",
-  "description": "API para integração com Pluggy e Supabase",
+  "description": "Backend para integração Pluggy + Supabase",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
+    "@supabase/supabase-js": "^2.39.5",
     "axios": "^1.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "pluggy-sdk": "latest",
-    "supabase": "^2.39.4"
+    "pluggy-sdk": "latest"
   }
 }
