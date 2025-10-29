@@ -30,16 +30,11 @@ app.get("/connect-token", async (req, res) => {
 })
 
 // ✅ (opcional) Endpoint para listar conexões (caso precise)
-app.get("/connections", async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("connections").select("*")
-    if (error) throw error
-    res.json(data)
-  } catch (error) {
-    console.error("Erro ao buscar conexões:", error)
-    res.status(500).json({ error: error.message })
-  }
-})
+app.get('/connect-token', async (req, res) => {
+  // ...
+  const connectToken = await pluggyClient.connect.createConnectToken(newUser.id);
+  res.json(connectToken);
+});
 
 // Porta do Render
 const port = process.env.PORT || 10000
