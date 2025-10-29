@@ -1,43 +1,51 @@
 // index.js
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import pluggyClient from "./pluggy.js";
-import supabase from "./supabase.js";
+import express from "express"
+import cors from "cors"
+import dotenv from "dotenv"
+import pluggyClient from "./pluggy.js"
+import supabase from "./supabase.js"
+import webhook from "./webhook.js" // 🆕 novo import
 
-dotenv.config();
+dotenv.config()
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+const app = express()
+app.use(cors())
+app.use(express.json())
 
-// 🩺 Healthcheck
-app.get("/health", (req, res) => {
-  res.json({ ok: true, message: "Servidor rodando corretamente 🚀" });
-});
+// ✅ Healthcheck
+app.get("/", (req, res) => {
+  res.send("✅ API FinanceFlow rodando com sucesso!")
+})
 
-// 🔑 Gera o connect token do Pluggy (usado pelo front para abrir o modal de conexão)
+// ✅ Endpoint de geração do Connect Token (para o front)
 app.get("/connect-token", async (req, res) => {
   try {
-    // método correto da 0.78.x
-    const connectToken = await pluggyClient.createConnectToken()
-    res.json(connectToken)
+    const response = await pluggyClient.connect.create({
+      clientUserId: "user-" + Date.now().toString(),
+    })
+    res.json(response)
   } catch (error) {
     console.error("Erro ao gerar connect token:", error)
     res.status(500).json({ error: error.message })
   }
 })
-// 💡 Exemplo de integração futura com Supabase (quando você salvar conexões ou usuários)
-app.get("/users", async (req, res) => {
-  const { data, error } = await supabase.from("users").select("*");
-  if (error) {
-    return res.status(500).json({ error: error.message });
-  }
-  res.json(data);
-});
 
-// 🚀 Inicializa o servidor
-const port = process.env.PORT || 3000;
+// ✅ Endpoint para listar conexões salvas no Supabase
+app.get("/connections", async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("bank_connections").select("*")
+    if (error) throw error
+    res.json(data)
+  } catch (error) {
+    console.error("Erro ao buscar conexões:", error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// ✅ Rota do webhook (Pluggy → Render)
+app.use("/", webhook)
+
+const port = process.env.PORT || 10000
 app.listen(port, () => {
-  console.log(`✅ Server online na porta ${port}`);
-});
+  console.log(`✅ Server online na porta ${port}`)
+})
