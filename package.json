@@ -1,0 +1,15 @@
+{
+  "name": "pluggy-api",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "pluggy-sdk": "^3.1.0",
+    "@supabase/supabase-js": "^2.38.3"
+  }
+}
