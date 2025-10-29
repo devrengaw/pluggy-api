@@ -12,15 +12,12 @@ app.use(cors());
 app.use(express.json());
 
 // Healthcheck simples
-app.get("/api/create-link-token", async (req, res) => {
-  try {
-    const response = await pluggyClient.api.connectToken.create();
-    res.json(response);
-  } catch (err) {
-    console.error("Erro ao gerar connect token:", err);
-    res.status(500).json({ error: err.message });
-  }
+app.get('/connect-token', async (req, res) => {
+  // ...
+  const connectToken = await pluggyClient.connect.createConnectToken(newUser.id);
+  res.json(connectToken);
 });
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`✅ Server online na porta ${port}`);
