@@ -1,14 +1,12 @@
 // pluggy.js
-import { createRequire } from "module";
-import dotenv from "dotenv";
-dotenv.config();
+import Pluggy from 'pluggy-sdk'
+import dotenv from 'dotenv'
 
-const require = createRequire(import.meta.url);
-const Pluggy = require("pluggy-sdk");
+dotenv.config()
 
-const pluggyClient = new Pluggy({
+const pluggyClient = new Pluggy.PluggyClient({
   clientId: process.env.PLUGGY_CLIENT_ID,
-  clientSecret: process.env.PLUGGY_CLIENT_SECRET,
-});
+  clientSecret: process.env.PLUGGY_CLIENT_SECRET
+})
 
-export default pluggyClient;
+export default pluggyClient
