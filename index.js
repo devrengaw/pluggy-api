@@ -53,7 +53,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const valor = text.split(" ")[1];
     const descricao = text.split(" ").slice(2).join(" ") || "Sem descrição";
 
-    const { error } = await supabase.from("transactions").insert({
+    const { error } = await supabase.from("transacoes").insert({
       tipo: "entrada",
       valor,
       descricao,
@@ -74,7 +74,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const valor = text.split(" ")[1];
     const descricao = text.split(" ").slice(2).join(" ") || "Sem descrição";
 
-    const { error } = await supabase.from("transactions").insert({
+    const { error } = await supabase.from("transacoes").insert({
       tipo: "saida",
       valor,
       descricao,
