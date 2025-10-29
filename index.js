@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { PluggyClient } from 'pluggy-sdk';
+import Pluggy from 'pluggy-sdk';
 import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 // Inicializa Pluggy
-const pluggyClient = new PluggyClient({
+const pluggyClient = new Pluggy.PluggyClient({
   clientId: process.env.PLUGGY_CLIENT_ID,
   clientSecret: process.env.PLUGGY_CLIENT_SECRET
 });
