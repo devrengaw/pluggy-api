@@ -57,10 +57,10 @@ app.get('/connect-token', async (req, res) => {
 
     // 4. Retorna o token para o frontend
     res.json(connectToken);
-  } catch (error) {
-    console.error('Erro ao gerar connect token:', error);
-    res.status(500).json({ error: 'Erro ao gerar token de conexão' });
-  }
+ } catch (error) {
+  console.error('Erro ao gerar connect token:', error);
+  res.status(500).json({ error: error.message || error });
+}
 });
 
 // (Opcional) Rota para listar usuários (apenas para testes)
