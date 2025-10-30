@@ -289,6 +289,66 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
+import OpenAI from "openai";
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// 🧠 COMANDO INTELIGENTE — IA FINANCEIRA
+async function comandoInteligente(chatId, text) {
+  const pergunta = text.replace("/inteligente", "").trim();
+
+  if (!pergunta) {
+    await sendMessage(chatId, "💬 Envie sua pergunta após o comando. Exemplo:\n/inteligente quanto gastei em alimentação este mês?");
+    return;
+  }
+
+  // 1️⃣ Buscar todas as transações do usuário
+  const { data, error } = await supabase
+    .from("transacoes")
+    .select("tipo, valor, descricao, metodo, cartao, created_at")
+    .eq("chat_id", chatId);
+
+  if (error || !data || data.length === 0) {
+    await sendMessage(chatId, "📭 Não encontrei dados suficientes para responder.");
+    return;
+  }
+
+  // 2️⃣ Montar contexto dos dados
+  const contexto = data
+    .map((t) => {
+      const dataFormatada = new Date(t.created_at).toLocaleDateString("pt-BR");
+      return `${dataFormatada}: ${t.tipo} R$${t.valor} - ${t.descricao} (${t.metodo || "n/a"})`;
+    })
+    .join("\n");
+
+  // 3️⃣ Pedir para o GPT interpretar e responder
+  const prompt = `
+Você é um assistente financeiro que analisa transações de um usuário.
+Aqui estão as transações:
+
+${contexto}
+
+Pergunta do usuário:
+"${pergunta}"
+
+Responda de forma curta, direta e em português, com valores aproximados em reais (R$).
+`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "system", content: "Você é um assistente financeiro pessoal." }, { role: "user", content: prompt }],
+      temperature: 0.2,
+    });
+
+    const resposta = completion.choices[0].message.content;
+    await sendMessage(chatId, `🤖 ${resposta}`);
+  } catch (err) {
+    console.error("Erro IA:", err);
+    await sendMessage(chatId, "⚠️ Erro ao processar a pergunta com IA.");
+  }
+}
+
+
 // ============================================================
 // 🌐 SERVER
 // ============================================================
