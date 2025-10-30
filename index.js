@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Categorias e Aprendizado Adaptativo
+// index.js — FinanceFlow com IA, Categorias, Aprendizado Adaptativo e Menu Inteligente
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -51,7 +51,42 @@ async function buscarUsuario(chatId) {
 }
 
 /* ============================================================
-🧠 APRENDIZADO — FUNÇÕES DE MEMÓRIA
+🧠 INTERPRETAÇÃO NATURAL (GPT)
+============================================================ */
+async function interpretarMensagem(text) {
+  const prompt = `
+Você é um analisador de mensagens financeiras.
+Identifique se o texto representa uma "entrada", "saida", "consulta", "menu" ou "outros".
+Extraia o valor numérico e uma breve descrição.
+
+Retorne APENAS JSON, neste formato:
+{
+  "acao": "entrada" | "saida" | "consulta" | "menu" | "outros",
+  "valor": número ou null,
+  "descricao": "texto curto"
+}
+
+Texto: "${text}"
+`;
+
+  try {
+    const result = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.1,
+    });
+    const raw = result.choices[0].message.content.trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return { acao: "outros", valor: null, descricao: text };
+    return JSON.parse(match[0]);
+  } catch (err) {
+    console.error("⚠️ Erro IA:", err);
+    return { acao: "outros", valor: null, descricao: text };
+  }
+}
+
+/* ============================================================
+🧠 APRENDIZADO — MEMÓRIA DE ESSENCIALIDADE
 ============================================================ */
 async function atualizarMemoriaEssencial(userId, descricao, essencial) {
   const palavras = extrairPalavrasChave(descricao);
@@ -87,7 +122,7 @@ function extrairPalavrasChave(texto) {
     .toLowerCase()
     .split(/[\s,.;:!?()]+/)
     .filter((p) => p.length > 3 && isNaN(p))
-    .slice(0, 5); // máximo 5 palavras
+    .slice(0, 5);
 }
 
 async function preverEssencialUsuario(userId, descricao) {
@@ -99,13 +134,22 @@ async function preverEssencialUsuario(userId, descricao) {
       .eq("user_id", userId)
       .eq("palavra", palavra)
       .maybeSingle();
-    if (data) return data.essencial; // achou uma palavra conhecida
+    if (data) return data.essencial;
   }
   return null;
 }
 
+function preverEssencialHeuristico(texto) {
+  const lower = texto.toLowerCase();
+  const essenciais = ["supermercado", "aluguel", "energia", "luz", "água", "transporte", "mercado", "gasolina"];
+  const naoEssenciais = ["cinema", "netflix", "spotify", "restaurante", "bar", "viagem", "lazer"];
+  if (essenciais.some((p) => lower.includes(p))) return true;
+  if (naoEssenciais.some((p) => lower.includes(p))) return false;
+  return null;
+}
+
 /* ============================================================
-💰 REGISTRO DE TRANSAÇÃO (com aprendizado)
+💰 REGISTRO DE TRANSAÇÃO (IA + aprendizado)
 ============================================================ */
 async function registrarTransacao({
   tipo,
@@ -117,16 +161,10 @@ async function registrarTransacao({
   familyId,
   perguntarEssencial,
 }) {
-  // 1️⃣ Verificar se o usuário já tem histórico de aprendizado
   const aprendizado = await preverEssencialUsuario(userId, descricao);
-
-  // 2️⃣ Se IA pessoal não souber, usar heurística geral
   let essencial = aprendizado;
-  if (essencial === null) {
-    essencial = preverEssencialHeuristico(descricao);
-  }
+  if (essencial === null) essencial = preverEssencialHeuristico(descricao);
 
-  // 3️⃣ Inserir transação
   const { data, error } = await supabase
     .from("transacoes")
     .insert({
@@ -143,13 +181,14 @@ async function registrarTransacao({
     .maybeSingle();
 
   if (error) {
+    console.error("Erro ao registrar:", error);
     await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
     return;
   }
 
-  await sendMessage(chatId, `✅ ${tipo.toUpperCase()} registrada!\n💰 R$${valor}`);
+  const label = tipo === "entrada" ? "Entrada registrada: 💰" : "Saída registrada: 💸";
+  await sendMessage(chatId, `${label} R$${valor} (${descricao})`);
 
-  // 4️⃣ Perguntar sobre essencialidade, se necessário
   if (perguntarEssencial && data.essencial === null) {
     const replyMarkup = {
       inline_keyboard: [
@@ -159,20 +198,8 @@ async function registrarTransacao({
         ],
       ],
     };
-    await sendMessage(chatId, "Essa despesa é essencial ou não essencial?", replyMarkup);
+    await sendMessage(chatId, "Essa despesa é essencial?", replyMarkup);
   }
-}
-
-/* ============================================================
-🧠 Heurística geral (fallback)
-============================================================ */
-function preverEssencialHeuristico(texto) {
-  const lower = texto.toLowerCase();
-  const essenciais = ["supermercado", "aluguel", "energia", "luz", "água", "transporte", "mercado", "gasolina"];
-  const naoEssenciais = ["cinema", "netflix", "spotify", "restaurante", "bar", "viagem", "lazer"];
-  if (essenciais.some((p) => lower.includes(p))) return true;
-  if (naoEssenciais.some((p) => lower.includes(p))) return false;
-  return null;
 }
 
 /* ============================================================
@@ -187,15 +214,32 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
     .select("descricao")
     .maybeSingle();
 
-  if (error) {
-    await sendMessage(chatId, "⚠️ Erro ao atualizar essencialidade.");
-  } else {
+  if (!error) {
     await sendMessage(
       chatId,
       essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*"
     );
     await atualizarMemoriaEssencial(userId, data.descricao, essencial);
   }
+}
+
+/* ============================================================
+📋 MENU / AJUDA
+============================================================ */
+async function comandoMenu(chatId) {
+  await sendMessage(
+    chatId,
+    `
+👋 *Bem-vindo ao FinanceFlow!*
+Você pode falar comigo naturalmente 🧠
+
+Exemplos:
+- "recebi 2000 salário"
+- "gastei 150 mercado"
+- "quanto tenho?"
+- "/ajuda" → Mostra este menu
+`
+  );
 }
 
 /* ============================================================
@@ -217,36 +261,39 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       await definirEssencialidade(transacaoId, valor, chatId, userId);
       await sendCallbackAnswer(callback.id, "Aprendido!");
     }
-
     return res.sendStatus(200);
   }
 
   // === MENSAGENS ===
   const msg = body.message;
   if (!msg) return res.sendStatus(200);
-
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  const userData = await buscarUsuario(chatId);
-  if (!userData) {
-    await sendMessage(chatId, "🔒 Sua conta não está vinculada. Use `/ativar TLG-XXXXXX`");
+  // === AJUDA ===
+  if (["/menu", "/ajuda", "ajuda", "menu"].includes(text.toLowerCase())) {
+    await comandoMenu(chatId);
     return res.sendStatus(200);
   }
 
+  // === BUSCAR USUÁRIO ===
+  const userData = await buscarUsuario(chatId);
+  if (!userData) {
+    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/ativar TLG-XXXXXX`");
+    return res.sendStatus(200);
+  }
   const { user_id, family_id, perguntar_essencial } = userData;
 
-  // Registrar transação simples (IA + aprendizado)
-  const acao = text.includes("+") ? "entrada" : text.includes("-") ? "saida" : "outros";
-  const valor = parseFloat(text.replace(/[^\d.,]/g, "").replace(",", ".")) || null;
-  const descricao = text.replace(/[+-]?\d+[,.]?\d*/g, "").trim();
+  // === INTERPRETAÇÃO IA ===
+  const interpret = await interpretarMensagem(text);
+  console.log("🧠 Interpretação:", interpret);
 
-  if (["entrada", "saida"].includes(acao) && valor) {
+  if (["entrada", "saida"].includes(interpret.acao) && interpret.valor) {
     await registrarTransacao({
-      tipo: acao,
-      valor,
-      descricao,
+      tipo: interpret.acao,
+      valor: interpret.valor,
+      descricao: interpret.descricao,
       tipo_fixo: "variavel",
       chatId,
       userId: user_id,
@@ -254,7 +301,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       perguntarEssencial: perguntar_essencial,
     });
   } else {
-    await sendMessage(chatId, "💬 Envie algo como `-300 mercado` ou `+2500 salário`");
+    await sendMessage(chatId, "💬 Envie algo como `+2500 salário` ou `-300 mercado`");
   }
 
   res.sendStatus(200);
