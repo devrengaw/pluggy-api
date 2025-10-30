@@ -166,17 +166,15 @@ async function comandoExtrato(chatId) {
 }
 
 // ============================================================
-// 🧠 COMANDO INTELIGENTE COM MEMÓRIA CONTEXTUAL
+// 🧠 COMANDO INTELIGENTE COM MEMÓRIA
 // ============================================================
 async function comandoInteligente(chatId, text) {
-  const pergunta = text.replace("/inteligente", "").trim();
-
+  const pergunta = text.trim();
   if (!pergunta) {
-    await sendMessage(chatId, "💬 Envie sua pergunta após o comando. Exemplo:\n/inteligente quanto gastei este mês?");
+    await sendMessage(chatId, "💬 Pode me perguntar algo, por exemplo:\n'Quanto gastei este mês?'");
     return;
   }
 
-  // 1️⃣ Buscar histórico de conversa do usuário
   const { data: historico } = await supabase
     .from("conversas")
     .select("role, content")
@@ -189,10 +187,8 @@ async function comandoInteligente(chatId, text) {
     content: m.content,
   })) || [];
 
-  // 2️⃣ Adicionar a nova pergunta
   contexto.push({ role: "user", content: pergunta });
 
-  // 3️⃣ Buscar transações do usuário
   const { data: transacoes } = await supabase
     .from("transacoes")
     .select("tipo, valor, descricao, metodo, created_at")
@@ -206,17 +202,14 @@ async function comandoInteligente(chatId, text) {
         ).toLocaleDateString("pt-BR")}`
     ).join("\n") || "Nenhuma transação registrada.";
 
-  // 4️⃣ Criar prompt com base nas transações
   const systemPrompt = `
-Você é um assistente financeiro pessoal. 
-Analise as transações abaixo e responda de forma simples e direta.
-Mantenha contexto da conversa para entender perguntas relacionadas.
-
-Transações conhecidas:
+Você é um assistente financeiro pessoal.
+Fale de forma natural, amigável e encorajadora.
+Analise as transações abaixo e ajude o usuário a entender seus hábitos financeiros.
+Transações:
 ${resumo}
 `;
 
-  // 5️⃣ Obter resposta do GPT
   try {
     const resposta = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -226,7 +219,6 @@ ${resumo}
 
     const conteudo = resposta.choices[0].message.content;
 
-    // 6️⃣ Salvar pergunta e resposta no histórico
     await supabase.from("conversas").insert([
       { chat_id: chatId, role: "user", content: pergunta },
       { chat_id: chatId, role: "assistant", content: conteudo },
@@ -235,7 +227,7 @@ ${resumo}
     await sendMessage(chatId, `🤖 ${conteudo}`);
   } catch (err) {
     console.error("Erro IA:", err);
-    await sendMessage(chatId, "⚠️ Erro ao processar sua pergunta.");
+    await sendMessage(chatId, "⚠️ Erro ao processar sua pergunta com IA.");
   }
 }
 
@@ -248,23 +240,30 @@ async function comandoLimpar(chatId) {
 }
 
 // ============================================================
-// 🤖 ROTEAMENTO DO TELEGRAM
+// 🤖 ROTEAMENTO DO TELEGRAM (CONVERSACIONAL)
 // ============================================================
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const message = req.body.message;
   if (!message) return res.sendStatus(200);
   const chatId = message.chat.id;
-  const text = message.text?.trim().toLowerCase() || "";
+  const text = message.text?.trim() || "";
 
   try {
-    if (text.startsWith("/entrada")) await comandoEntrada(chatId, text);
+    // 👋 Mensagem inicial de boas-vindas (mais natural)
+    if (text.toLowerCase() === "/start") {
+      await sendMessage(
+        chatId,
+        "👋 Oi! Que bom te ver por aqui.\n\nSou seu *assistente financeiro pessoal* — posso te ajudar a entender, organizar e acompanhar suas finanças do dia a dia.\n\nVocê pode conversar comigo de forma natural 😊\n\nPor exemplo:\n• _Quanto gastei este mês?_\n• _Quais foram meus gastos com alimentação?_\n• _Adicione uma entrada de 200 salário_\n• _Registre uma saída de 50 mercado crédito Nubank_\n\nE se quiser recomeçar do zero, é só digitar */limpar* 🧹"
+      );
+    } else if (text.startsWith("/entrada")) await comandoEntrada(chatId, text);
     else if (text.startsWith("/saida")) await comandoSaida(chatId, text);
     else if (text === "/saldo") await comandoSaldo(chatId);
     else if (text === "/resumo") await comandoResumo(chatId);
     else if (text === "/extrato") await comandoExtrato(chatId);
-    else if (text.startsWith("/inteligente")) await comandoInteligente(chatId, text);
     else if (text === "/limpar") await comandoLimpar(chatId);
-    else await sendMessage(chatId, "👋 Use /ajuda para ver os comandos disponíveis.");
+    else {
+      await comandoInteligente(chatId, text);
+    }
   } catch (err) {
     console.error("Erro no webhook:", err);
     await sendMessage(chatId, "⚠️ Ocorreu um erro inesperado.");
