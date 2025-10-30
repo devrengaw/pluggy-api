@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Categorias, Aprendizado Adaptativo e Menu Inteligente (corrigido e completo)
+// index.js — FinanceFlow com IA, Categorias, Aprendizado Adaptativo e Regras de Essencialidade Inteligente
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -139,31 +139,34 @@ async function preverEssencialUsuario(userId, descricao) {
   return null;
 }
 
-function preverEssencialHeuristico(texto) {
-  const lower = texto.toLowerCase();
-  const essenciais = ["supermercado", "aluguel", "energia", "luz", "água", "transporte", "mercado", "gasolina"];
-  const naoEssenciais = ["cinema", "netflix", "spotify", "restaurante", "bar", "viagem", "lazer"];
-  if (essenciais.some((p) => lower.includes(p))) return true;
-  if (naoEssenciais.some((p) => lower.includes(p))) return false;
-  return null;
+/* ============================================================
+💡 Função para detectar se é fixa ou variável
+============================================================ */
+function detectarTipoFixo(descricao) {
+  const fixas = ["aluguel", "condominio", "energia", "internet", "telefone", "plano", "mensalidade"];
+  const variaveis = ["mercado", "lazer", "restaurante", "compras", "uber", "gasolina", "viagem"];
+  const lower = descricao.toLowerCase();
+  if (fixas.some((p) => lower.includes(p))) return "fixa";
+  if (variaveis.some((p) => lower.includes(p))) return "variavel";
+  return "variavel";
 }
 
 /* ============================================================
-💰 REGISTRO DE TRANSAÇÃO (IA + aprendizado + categoria)
+💰 REGISTRO DE TRANSAÇÃO
 ============================================================ */
 async function registrarTransacao({
   tipo,
   valor,
   descricao,
-  tipo_fixo,
   chatId,
   userId,
   familyId,
   perguntarEssencial,
 }) {
+  const tipo_fixo = detectarTipoFixo(descricao);
   const aprendizado = await preverEssencialUsuario(userId, descricao);
   let essencial = aprendizado;
-  if (essencial === null) essencial = preverEssencialHeuristico(descricao);
+  if (essencial === null) essencial = null;
 
   const { data, error } = await supabase
     .from("transacoes")
@@ -178,7 +181,7 @@ async function registrarTransacao({
       family_id: familyId || null,
       chat_id: chatId.toString(),
     })
-    .select("id, essencial, categoria")
+    .select("id, essencial, categoria, tipo")
     .maybeSingle();
 
   if (error) {
@@ -190,29 +193,27 @@ async function registrarTransacao({
   const label = tipo === "entrada" ? "Entrada registrada: 💰" : "Saída registrada: 💸";
   await sendMessage(chatId, `${label} R$${valor} (${descricao})`);
 
-  // 🗂 Perguntar categoria
-  if (!data.categoria) {
-    const replyMarkup = {
-      inline_keyboard: [
-        [
-          { text: "🍽 Alimentação", callback_data: `cat_${data.id}_alimentacao` },
-          { text: "🏠 Moradia", callback_data: `cat_${data.id}_moradia` },
-        ],
-        [
-          { text: "🚗 Transporte", callback_data: `cat_${data.id}_transporte` },
-          { text: "🎉 Lazer", callback_data: `cat_${data.id}_lazer` },
-        ],
-        [
-          { text: "💊 Saúde", callback_data: `cat_${data.id}_saude` },
-          { text: "💼 Trabalho", callback_data: `cat_${data.id}_trabalho` },
-        ],
+  // Perguntar categoria
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: "🍽 Alimentação", callback_data: `cat_${data.id}_alimentacao` },
+        { text: "🏠 Moradia", callback_data: `cat_${data.id}_moradia` },
       ],
-    };
-    await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
-  }
+      [
+        { text: "🚗 Transporte", callback_data: `cat_${data.id}_transporte` },
+        { text: "🎉 Lazer", callback_data: `cat_${data.id}_lazer` },
+      ],
+      [
+        { text: "💊 Saúde", callback_data: `cat_${data.id}_saude` },
+        { text: "💼 Trabalho", callback_data: `cat_${data.id}_trabalho` },
+      ],
+    ],
+  };
+  await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
 
-  // 🧠 Perguntar essencialidade SOMENTE se for saída
-  if (tipo === "saida" && perguntarEssencial && data.essencial === null) {
+  // Perguntar essencialidade SOMENTE se for saída
+  if (tipo === "saida" && perguntarEssencial) {
     const replyMarkupEss = {
       inline_keyboard: [
         [
@@ -307,7 +308,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  // === AJUDA ===
+  // === MENU ===
   if (["/menu", "/ajuda", "ajuda", "menu"].includes(text.toLowerCase())) {
     await comandoMenu(chatId);
     return res.sendStatus(200);
@@ -330,7 +331,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       tipo: interpret.acao,
       valor: interpret.valor,
       descricao: interpret.descricao,
-      tipo_fixo: "variavel",
       chatId,
       userId: user_id,
       familyId: family_id,
