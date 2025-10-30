@@ -1,4 +1,4 @@
-// index.js — FinanceFlow integrado ao Hub da Família (Horizons)
+// index.js — FinanceFlow com suporte a Hub Familiar e uso individual
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -17,7 +17,7 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ============================================================
-🔧 UTILITÁRIOS
+🔧 FUNÇÕES BÁSICAS
 ============================================================ */
 async function sendMessage(chatId, text) {
   try {
@@ -27,105 +27,77 @@ async function sendMessage(chatId, text) {
       body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
     });
   } catch (err) {
-    console.error("❌ Erro ao enviar mensagem para Telegram:", err);
+    console.error("❌ Erro ao enviar mensagem:", err);
   }
 }
 
 async function buscarUsuario(chatId) {
   const { data } = await supabase
     .from("telegram_users")
-    .select("user_id")
+    .select("user_id, family_id")
     .eq("chat_id", chatId)
     .maybeSingle();
-  return data?.user_id || null;
-}
-
-async function buscarFamilyId(userId) {
-  const { data } = await supabase
-    .from("users")
-    .select("family_id")
-    .eq("id", userId)
-    .maybeSingle();
-  return data?.family_id || null;
+  return data || null;
 }
 
 /* ============================================================
-🔑 ATIVAÇÃO (aceita /ativar ou /vincular)
+🔑 ATIVAÇÃO (/ativar ou /vincular)
 ============================================================ */
 async function comandoAtivar(chatId, text) {
-  try {
-    const partes = text.trim().split(/\s+/);
-    const token = partes[1]?.trim();
+  const partes = text.trim().split(/\s+/);
+  const token = partes[1]?.trim();
 
-    if (!token) {
-      await sendMessage(chatId, "🔑 Envie o comando assim: `/ativar TG-123456`");
-      return;
-    }
-
-    console.log("🔍 Tentando ativar token:", token);
-
-    const { data: reg, error } = await supabase
-      .from("telegram_tokens")
-      .select("user_id, ativo, valid_until")
-      .eq("token", token)
-      .maybeSingle();
-
-    if (error) {
-      console.error("❌ Erro ao buscar token:", error);
-      await sendMessage(chatId, "⚠️ Erro interno ao validar o token. Tente novamente em alguns minutos.");
-      return;
-    }
-
-    if (!reg) {
-      await sendMessage(chatId, "❌ Código não encontrado. Gere um novo token no site e tente novamente.");
-      return;
-    }
-
-    if (!reg.ativo) {
-      await sendMessage(chatId, "⚠️ Este código já foi utilizado ou está desativado.");
-      return;
-    }
-
-    const now = new Date();
-    const validade = new Date(reg.valid_until);
-    if (validade < now) {
-      await sendMessage(chatId, "⌛ Este código expirou. Gere um novo token no site.");
-      return; // 🔒 NÃO ATIVA SE ESTIVER EXPIRADO
-    }
-
-    // 🔗 Vincular chat ↔ usuário
-    const { error: linkErr } = await supabase.from("telegram_users").upsert(
-      {
-        chat_id: chatId,
-        user_id: reg.user_id,
-        nome: "Usuário FinanceFlow",
-      },
-      { onConflict: "chat_id" }
-    );
-
-    if (linkErr) {
-      console.error("❌ Erro ao vincular usuário:", linkErr);
-      await sendMessage(chatId, "⚠️ Não foi possível concluir a vinculação. Tente novamente.");
-      return;
-    }
-
-    // Desativa token após uso
-    await supabase.from("telegram_tokens").update({ ativo: false }).eq("token", token);
-
-    // Atualiza users.telegram_chat_id
-    await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", reg.user_id);
-
-    console.log("✅ Token vinculado com sucesso ao user_id:", reg.user_id);
-
-    await sendMessage(chatId, "✅ Sua conta foi vinculada com sucesso! Agora você já pode usar todos os comandos do bot.");
-  } catch (err) {
-    console.error("❌ Erro geral no comando /ativar:", err);
-    await sendMessage(chatId, "⚠️ Erro inesperado ao ativar. Tente novamente mais tarde.");
+  if (!token) {
+    await sendMessage(chatId, "🔑 Envie o comando assim: `/ativar TG-123456`");
+    return;
   }
+
+  const { data: reg, error } = await supabase
+    .from("telegram_tokens")
+    .select("user_id, ativo, valid_until")
+    .eq("token", token)
+    .maybeSingle();
+
+  if (error || !reg) {
+    await sendMessage(chatId, "❌ Código inválido. Gere um novo token no site.");
+    return;
+  }
+
+  if (!reg.ativo) {
+    await sendMessage(chatId, "⚠️ Este código já foi utilizado ou está desativado.");
+    return;
+  }
+
+  const now = new Date();
+  const validade = new Date(reg.valid_until);
+  if (validade < now) {
+    await sendMessage(chatId, "⌛ Este código expirou. Gere um novo no site.");
+    return;
+  }
+
+  // 🔗 Vincular chat ↔ user (função SQL já sincroniza family_id)
+  const { error: linkErr } = await supabase.from("telegram_users").upsert(
+    {
+      chat_id: chatId,
+      user_id: reg.user_id,
+      nome: "Usuário FinanceFlow",
+    },
+    { onConflict: "chat_id" }
+  );
+  if (linkErr) {
+    console.error("Erro ao vincular:", linkErr);
+    await sendMessage(chatId, "⚠️ Falha ao vincular sua conta. Tente novamente.");
+    return;
+  }
+
+  await supabase.from("telegram_tokens").update({ ativo: false }).eq("token", token);
+  await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", reg.user_id);
+
+  await sendMessage(chatId, "✅ Sua conta foi vinculada com sucesso! Agora você já pode usar todos os comandos.");
 }
 
 /* ============================================================
-🧠 INTERPRETAÇÃO NATURAL
+💡 INTERPRETAÇÃO NATURAL
 ============================================================ */
 async function interpretarMensagem(text) {
   const prompt = `
@@ -133,11 +105,7 @@ Analise a frase e determine se é uma "entrada", "saida", "consulta" ou "outros"
 Extraia também o valor (número) e uma descrição resumida.
 
 Responda em JSON:
-{
-  "acao": "entrada" | "saida" | "consulta" | "outros",
-  "valor": 150.50 ou null,
-  "descricao": "texto breve"
-}
+{"acao": "...", "valor": 0, "descricao": "..."}
 
 Frase: "${text}"
 `;
@@ -148,58 +116,43 @@ Frase: "${text}"
       messages: [{ role: "user", content: prompt }],
       temperature: 0.1,
     });
-
-    const raw = result.choices[0].message.content.trim();
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) return { acao: "outros", valor: null, descricao: text };
-    return JSON.parse(match[0]);
+    const match = result.choices[0].message.content.match(/\{[\s\S]*\}/);
+    return match ? JSON.parse(match[0]) : { acao: "outros", valor: null, descricao: text };
   } catch (err) {
-    console.error("⚠️ Erro interpretando mensagem:", err);
+    console.error("Erro IA interpretação:", err);
     return { acao: "outros", valor: null, descricao: text };
   }
 }
 
 /* ============================================================
-💰 REGISTROS FINANCEIROS (com suporte ao Hub da Família)
+💰 REGISTRO FINANCEIRO (com ou sem família)
 ============================================================ */
-async function registrarTransacao({ tipo, valor, descricao, chatId, userId }) {
-  try {
-    const familyId = await buscarFamilyId(userId);
+async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId }) {
+  const transacao = {
+    tipo,
+    valor,
+    descricao,
+    chat_id: chatId,
+    user_id: userId,
+  };
+  if (familyId) transacao.family_id = familyId;
 
-    const insertObj = {
-      tipo,
-      categoria: "variavel",
-      valor,
-      descricao,
-      chat_id: chatId,
-      user_id: userId,
-    };
-
-    if (familyId) insertObj.family_id = familyId;
-
-    const { error } = await supabase.from("transacoes").insert(insertObj);
-
-    if (error) {
-      console.error(`❌ Erro ao salvar ${tipo}:`, error);
-      await sendMessage(chatId, `⚠️ Erro ao salvar ${tipo}.`);
-    } else {
-      const label = tipo === "entrada" ? "Entrada" : "Saída";
-      await sendMessage(chatId, `${label} registrada: R$${valor}`);
-    }
-  } catch (err) {
-    console.error("⚠️ Erro ao registrar transação:", err);
-    await sendMessage(chatId, "⚠️ Ocorreu um erro ao registrar a transação.");
+  const { error } = await supabase.from("transacoes").insert(transacao);
+  if (error) {
+    console.error("Erro ao salvar:", error);
+    await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
+  } else {
+    const label = tipo === "entrada" ? "Entrada" : "Saída";
+    await sendMessage(chatId, `${label} registrada: R$${valor}`);
   }
 }
 
 /* ============================================================
-🧮 CONSULTAS / SALDO via IA
+🧮 CONSULTA COM IA
 ============================================================ */
-async function responderConsulta(chatId, text) {
-  const { data } = await supabase
-    .from("transacoes")
-    .select("tipo, valor, descricao, created_at")
-    .eq("chat_id", chatId);
+async function responderConsulta(chatId, text, familyId, userId) {
+  const filtro = familyId ? { family_id: familyId } : { user_id: userId };
+  const { data } = await supabase.from("transacoes").select("*").match(filtro);
 
   const resumo =
     data?.map(
@@ -211,130 +164,58 @@ async function responderConsulta(chatId, text) {
 
   const prompt = `
 Você é um assistente financeiro.
-Transações recentes do usuário:
+Transações:
 ${resumo}
 
 Pergunta: "${text}"
-
-Responda de forma curta, direta e em português.
+Responda em português, curto e direto.
 `;
 
-  try {
-    const result = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-    });
-
-    const resposta = result.choices[0].message.content;
-    await sendMessage(chatId, `🤖 ${resposta}`);
-  } catch (err) {
-    console.error("Erro IA consulta:", err);
-    await sendMessage(chatId, "⚠️ Erro ao responder sua pergunta.");
-  }
+  const result = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+  });
+  await sendMessage(chatId, `🤖 ${result.choices[0].message.content}`);
 }
 
 /* ============================================================
-📊 PROJEÇÃO FINANCEIRA COM IA (NOVO)
-============================================================ */
-app.post("/projection", async (req, res) => {
-  try {
-    const { user_id } = req.body;
-    if (!user_id) return res.status(400).json({ error: "user_id é obrigatório" });
-
-    const { data, error } = await supabase
-      .from("transacoes")
-      .select("tipo, valor, descricao, created_at")
-      .eq("user_id", user_id)
-      .order("created_at", { ascending: true });
-
-    if (error) throw error;
-    if (!data || data.length === 0)
-      return res.status(404).json({ message: "Nenhum dado financeiro encontrado." });
-
-    const prompt = `
-Você é um consultor financeiro.
-Analise este histórico de transações:
-${JSON.stringify(data, null, 2)}
-
-Gere uma projeção para os próximos 6 meses:
-{
-  "meses": ["Nov/2025", "Dez/2025", ...],
-  "saldo_projetado": [3500, 4100, ...],
-  "recomendacoes": ["Reduzir gastos com lazer", ...]
-}
-Retorne o texto explicativo e o JSON.
-`;
-
-    const result = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-    });
-
-    res.json({ result: result.choices[0].message.content });
-  } catch (err) {
-    console.error("❌ Erro ao gerar projeção:", err);
-    res.status(500).json({ error: "Erro ao gerar projeção." });
-  }
-});
-
-/* ============================================================
-🤖 WEBHOOK TELEGRAM — conversa natural + ativação + hub
+🤖 WEBHOOK TELEGRAM
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  const message = req.body.message;
-  if (!message) return res.sendStatus(200);
-
-  const chatId = message.chat.id;
-  const text = message.text?.trim();
-  if (!text) return res.sendStatus(200);
+  const msg = req.body.message;
+  if (!msg) return res.sendStatus(200);
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim() || "";
 
   console.log("💬 Mensagem recebida:", text);
 
-  // comandos de ativação
   if (text.toLowerCase().startsWith("/ativar") || text.toLowerCase().startsWith("/vincular")) {
     await comandoAtivar(chatId, text);
     return res.sendStatus(200);
   }
 
-  const userId = await buscarUsuario(chatId);
-  if (!userId) {
-    await sendMessage(
-      chatId,
-      "🔒 Sua conta ainda não está vinculada. Gere seu token no site e envie `/ativar TG-123456`"
-    );
+  const userData = await buscarUsuario(chatId);
+  if (!userData) {
+    await sendMessage(chatId, "🔒 Sua conta não está vinculada. Gere um token no site e envie `/ativar TG-123456`");
     return res.sendStatus(200);
   }
 
-  try {
-    const interpretacao = await interpretarMensagem(text);
-    console.log("🧠 Interpretação:", interpretacao);
+  const { user_id, family_id } = userData;
+  const interpret = await interpretarMensagem(text);
 
-    if (["entrada", "saida"].includes(interpretacao.acao) && interpretacao.valor) {
-      await registrarTransacao({
-        tipo: interpretacao.acao,
-        valor: interpretacao.valor,
-        descricao: interpretacao.descricao,
-        chatId,
-        userId,
-      });
-    } else if (interpretacao.acao === "consulta") {
-      await responderConsulta(chatId, text);
-    } else if (text === "/projecao") {
-      const response = await fetch(`${process.env.RENDER_URL}/projection`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId }),
-      });
-      const projectionData = await response.json();
-      await sendMessage(chatId, projectionData.result || "⚠️ Não foi possível gerar projeção.");
-    } else {
-      await sendMessage(chatId, "💬 Não entendi como transação. Pode tentar novamente?");
-    }
-  } catch (err) {
-    console.error("Erro geral:", err);
-    await sendMessage(chatId, "⚠️ Ocorreu um erro inesperado.");
+  if (["entrada", "saida"].includes(interpret.acao) && interpret.valor) {
+    await registrarTransacao({
+      tipo: interpret.acao,
+      valor: interpret.valor,
+      descricao: interpret.descricao,
+      chatId,
+      userId: user_id,
+      familyId: family_id,
+    });
+  } else if (interpret.acao === "consulta") {
+    await responderConsulta(chatId, text, family_id, user_id);
+  } else {
+    await sendMessage(chatId, "💬 Não entendi bem. Pode tentar novamente?");
   }
 
   res.sendStatus(200);
