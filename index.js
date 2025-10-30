@@ -161,6 +161,62 @@ Responda de forma curta, direta e em português.
 }
 
 /* ============================================================
+📊 PROJEÇÃO FINANCEIRA COM IA (NOVO)
+============================================================ */
+app.post("/projection", async (req, res) => {
+  try {
+    const { user_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json({ error: "user_id é obrigatório" });
+    }
+
+    // Busca histórico financeiro
+    const { data, error } = await supabase
+      .from("transacoes")
+      .select("tipo, valor, descricao, created_at")
+      .eq("user_id", user_id)
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      return res
+        .status(404)
+        .json({ message: "Nenhum dado financeiro encontrado para este usuário." });
+    }
+
+    const prompt = `
+Você é um consultor financeiro inteligente.
+Analise o seguinte histórico de transações:
+${JSON.stringify(data, null, 2)}
+
+Gere uma projeção financeira para os próximos 6 meses com base nos padrões de receita e despesa.
+Inclua:
+- Um resumo explicativo em português simples e consultivo.
+- Um JSON com a estrutura:
+  {
+    "meses": ["Nov/2025", "Dez/2025", "Jan/2026", ...],
+    "saldo_projetado": [3500, 4100, 4700, ...],
+    "recomendacoes": ["Reduzir gastos com lazer", "Aumentar aporte mensal", ...]
+  }
+Retorne primeiro o texto explicativo e depois o JSON.
+`;
+
+    const result = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+    });
+
+    const resposta = result.choices[0].message.content;
+    res.json({ result: resposta });
+  } catch (err) {
+    console.error("❌ Erro ao gerar projeção:", err);
+    res.status(500).json({ error: "Erro ao gerar projeção financeira." });
+  }
+});
+
+/* ============================================================
 🤖 WEBHOOK TELEGRAM — conversa natural + hub
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
@@ -196,6 +252,15 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       });
     } else if (interpretacao.acao === "consulta") {
       await responderConsulta(chatId, text);
+    } else if (text === "/projecao") {
+      // 🔹 Novo comando para gerar projeção via Telegram
+      const response = await fetch(`${process.env.RENDER_URL}/projection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId }),
+      });
+      const projectionData = await response.json();
+      await sendMessage(chatId, projectionData.result || "⚠️ Não foi possível gerar projeção.");
     } else {
       await sendMessage(chatId, "💬 Não entendi como transação. Pode tentar novamente?");
     }
