@@ -1,4 +1,4 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Comandos Inteligentes
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Comandos Inteligentes + Vincular Telegram
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -48,6 +48,49 @@ async function buscarUsuario(chatId) {
     .eq("chat_id", chatId)
     .maybeSingle();
   return data || null;
+}
+
+/* ============================================================
+🔐 VINCULAR CONTA TELEGRAM → HORIZONS
+============================================================ */
+async function vincularConta(chatId, text) {
+  const token = text.split(" ")[1]?.trim();
+  if (!token) {
+    await sendMessage(chatId, "⚠️ Envie assim: `/vincular TLG-XXXXXX`");
+    return;
+  }
+
+  await sendMessage(chatId, `🔍 Tentando ativar token: ${token}`);
+
+  const { data: tokenData, error: tokenError } = await supabase
+    .from("telegram_tokens")
+    .select("user_id, family_id, ativo, valid_until")
+    .eq("token", token)
+    .maybeSingle();
+
+  if (tokenError || !tokenData) {
+    await sendMessage(chatId, "❌ Token inválido ou não encontrado.");
+    return;
+  }
+
+  if (!tokenData.ativo || (tokenData.valid_until && new Date(tokenData.valid_until) < new Date())) {
+    await sendMessage(chatId, "⚠️ Token expirado ou inativo. Gere um novo no site.");
+    return;
+  }
+
+  const { error: upsertError } = await supabase.from("telegram_users").upsert({
+    chat_id: chatId.toString(),
+    user_id: tokenData.user_id,
+    family_id: tokenData.family_id || null,
+  });
+
+  if (upsertError) {
+    console.error("❌ Erro ao vincular usuário:", upsertError);
+    await sendMessage(chatId, "❌ Erro ao vincular conta.");
+    return;
+  }
+
+  await sendMessage(chatId, "✅ Conta vinculada com sucesso! Agora você pode registrar entradas e saídas.");
 }
 
 /* ============================================================
@@ -164,7 +207,6 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
   await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
 
-  // 🗂 Categoria
   const replyMarkup = {
     inline_keyboard: [
       [
@@ -183,7 +225,6 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   };
   await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
 
-  // 🧠 Pergunta “essencial” apenas se for SAÍDA
   if (tipo === "saida" && perguntarEssencial) {
     const replyMarkupEss = {
       inline_keyboard: [
@@ -283,10 +324,15 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  // Buscar usuário
+  // === COMANDO /VINCULAR ===
+  if (text.toLowerCase().startsWith("/vincular")) {
+    await vincularConta(chatId, text);
+    return res.sendStatus(200);
+  }
+
   const user = await buscarUsuario(chatId);
   if (!user) {
-    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/ativar TLG-XXXXXX`");
+    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
     return res.sendStatus(200);
   }
 
@@ -294,7 +340,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const interpret = await interpretarMensagem(text);
   console.log("🧠 Interpretação:", interpret);
 
-  // Rotas IA
   switch (interpret.acao) {
     case "entrada":
     case "saida":
@@ -318,7 +363,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       break;
     case "menu":
     case "/ajuda":
-      await sendMessage(chatId, "💡 Comandos disponíveis:\n/saldo\n/resumo\n/projecao\n/limpar");
+      await sendMessage(chatId, "💡 Comandos disponíveis:\n/vincular TLG-XXXXXX\n/saldo\n/resumo\n/projecao\n/limpar");
       break;
     default:
       await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
