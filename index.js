@@ -17,6 +17,44 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ============================================================
+// 🔐 GARANTIR USUÁRIO (VÍNCULO TELEGRAM ↔ SUPABASE USER)
+// ============================================================
+async function garantirUsuario(chatId) {
+  // Verifica se o chat_id já está vinculado
+  const { data: vinculo } = await supabase
+    .from("telegram_users")
+    .select("user_id")
+    .eq("chat_id", chatId)
+    .single();
+
+  if (!vinculo) {
+    // Cria novo usuário básico no Supabase
+    const { data: novoUser, error: userError } = await supabase
+      .from("users")
+      .insert({ nome: "Usuário Telegram", origem: "telegram" })
+      .select()
+      .single();
+
+    if (userError) {
+      console.error("Erro ao criar usuário:", userError);
+      return null;
+    }
+
+    // Faz o vínculo chat_id → user_id
+    await supabase.from("telegram_users").insert({
+      chat_id: chatId,
+      user_id: novoUser.id,
+      nome: "Usuário Telegram",
+    });
+
+    console.log("👤 Novo usuário vinculado:", novoUser.id);
+    return novoUser.id;
+  }
+
+  return vinculo.user_id;
+}
+
+// ============================================================
 // 🔧 FUNÇÕES UTILITÁRIAS
 // ============================================================
 async function sendMessage(chatId, text) {
@@ -45,6 +83,7 @@ async function calcularSaldo(chatId) {
 // 💰 COMANDOS FINANCEIROS
 // ============================================================
 async function comandoEntrada(chatId, text) {
+  const userId = await garantirUsuario(chatId);
   const parts = text.split(" ");
   const valor = parts[1];
   const descricao = parts.slice(2).join(" ") || "Sem descrição";
@@ -54,6 +93,7 @@ async function comandoEntrada(chatId, text) {
     valor,
     descricao,
     chat_id: chatId,
+    user_id: userId,
   });
 
   if (error) {
@@ -65,6 +105,7 @@ async function comandoEntrada(chatId, text) {
 }
 
 async function comandoSaida(chatId, text) {
+  const userId = await garantirUsuario(chatId);
   const parts = text.split(" ");
   const valor = parts[1];
   const descricao = parts[2] || "Sem descrição";
@@ -78,6 +119,7 @@ async function comandoSaida(chatId, text) {
     metodo,
     cartao,
     chat_id: chatId,
+    user_id: userId,
   });
 
   if (error) {
@@ -249,7 +291,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = message.text?.trim() || "";
 
   try {
-    // 👋 Mensagem inicial de boas-vindas (mais natural)
+    await garantirUsuario(chatId); // 🔗 garante vínculo do chat com user_id
+
+    // 👋 Mensagem inicial de boas-vindas
     if (text.toLowerCase() === "/start") {
       await sendMessage(
         chatId,
