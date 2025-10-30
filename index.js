@@ -1,9 +1,9 @@
-// index.js (backend Render)
+// index.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
-import pluggyClient from "./pluggy.js"; // mantido se você já usa
+import pluggyClient from "./pluggy.js";
 import supabase from "./supabase.js";
 import OpenAI from "openai";
 
@@ -17,9 +17,29 @@ app.use(bodyParser.json());
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ============================================================
- 🔧 UTILITÁRIOS
-============================================================ */
+
+// ============================================================
+// 🔐 GARANTIR USUÁRIO (VÍNCULO TELEGRAM ↔ SUPABASE USER)
+// ============================================================
+async function garantirUsuario(chatId) {
+  const { data: vinculo } = await supabase
+    .from("telegram_users")
+    .select("user_id")
+    .eq("chat_id", chatId)
+    .single();
+
+  if (!vinculo) {
+    console.log("⚠️ Nenhum vínculo encontrado para chat_id:", chatId);
+    return null;
+  }
+
+  return vinculo.user_id;
+}
+
+
+// ============================================================
+// 🔧 FUNÇÕES UTILITÁRIAS
+// ============================================================
 async function sendMessage(chatId, text) {
   await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
     method: "POST",
@@ -28,103 +48,31 @@ async function sendMessage(chatId, text) {
   });
 }
 
-/**
- * Busca o user_id pelo chat_id.
- * Não cria usuário: apenas retorna o vínculo se existir.
- * Retorna null se ainda não estiver ativado.
- */
-async function garantirUsuario(chatId) {
-  const { data: vinculo } = await supabase
-    .from("telegram_users")
-    .select("user_id")
-    .eq("chat_id", chatId)
-    .maybeSingle();
-
-  return vinculo?.user_id || null;
-}
-
-async function checarPlano(chatId, userId) {
-  // opcional: bloqueio por plano
-  const { data: u } = await supabase
-    .from("users")
-    .select("plano")
-    .eq("id", userId)
-    .single();
-
-  if (!u || (u.plano && u.plano !== "pro")) {
-    await sendMessage(chatId, "🔒 O uso do bot está disponível somente no plano PRO.");
-    return false;
-  }
-  return true;
-}
-
-async function calcularSaldo(chatId) {
+async function calcularSaldo(userId) {
   const { data, error } = await supabase
     .from("transacoes")
     .select("tipo, valor")
-    .eq("chat_id", chatId);
+    .eq("user_id", userId);
   if (error || !data) return null;
   const saldo = data.reduce(
-    (acc, item) => acc + (item.tipo === "entrada" ? Number(item.valor) : -Number(item.valor)),
+    (acc, item) =>
+      acc + (item.tipo === "entrada" ? Number(item.valor) : -Number(item.valor)),
     0
   );
   return saldo.toFixed(2);
 }
 
-/* ============================================================
- 🔑 ATIVAÇÃO /ativar (token gerado no site)
-============================================================ */
-async function comandoAtivar(chatId, text) {
-  const partes = text.split(" ");
-  const token = partes[1];
 
-  if (!token) {
-    await sendMessage(chatId, "🔑 Envie assim: `/ativar TG-123456`");
+// ============================================================
+// 💰 COMANDOS FINANCEIROS
+// ============================================================
+async function comandoEntrada(chatId, text) {
+  const userId = await garantirUsuario(chatId);
+  if (!userId) {
+    await sendMessage(chatId, "⚠️ Sua conta ainda não está vinculada. Gere seu token no site e envie /vincular <seu_token>.");
     return;
   }
 
-  const { data: reg, error } = await supabase
-    .from("telegram_tokens")
-    .select("user_id, ativo")
-    .eq("token", token)
-    .maybeSingle();
-
-  if (error || !reg) {
-    await sendMessage(chatId, "❌ Código inválido.");
-    return;
-  }
-  if (!reg.ativo) {
-    await sendMessage(chatId, "⚠️ Este código já foi utilizado ou está desativado.");
-    return;
-  }
-
-  // 1) Vincula chat ↔ user
-  const { error: linkErr } = await supabase.from("telegram_users").upsert(
-    {
-      chat_id: chatId,
-      user_id: reg.user_id,
-      nome: "Usuário FinanceFlow",
-    },
-    { onConflict: "chat_id" }
-  );
-  if (linkErr) {
-    await sendMessage(chatId, "⚠️ Não foi possível concluir a ativação (vínculo).");
-    return;
-  }
-
-  // 2) Desativa token (uso único)
-  await supabase.from("telegram_tokens").update({ ativo: false }).eq("token", token);
-
-  // 3) Atualiza users.telegram_chat_id (o trigger também faria, mas garantimos aqui)
-  await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", reg.user_id);
-
-  await sendMessage(chatId, "✅ Sua conta foi conectada com sucesso! Você já pode usar os comandos do bot.");
-}
-
-/* ============================================================
- 💰 COMANDOS FINANCEIROS
-============================================================ */
-async function comandoEntrada(chatId, text, userId) {
   const parts = text.split(" ");
   const valor = parts[1];
   const descricao = parts.slice(2).join(" ") || "Sem descrição";
@@ -145,7 +93,13 @@ async function comandoEntrada(chatId, text, userId) {
   }
 }
 
-async function comandoSaida(chatId, text, userId) {
+async function comandoSaida(chatId, text) {
+  const userId = await garantirUsuario(chatId);
+  if (!userId) {
+    await sendMessage(chatId, "⚠️ Sua conta ainda não está vinculada. Gere seu token no site e envie /vincular <seu_token>.");
+    return;
+  }
+
   const parts = text.split(" ");
   const valor = parts[1];
   const descricao = parts[2] || "Sem descrição";
@@ -166,22 +120,37 @@ async function comandoSaida(chatId, text, userId) {
     console.error("❌ Erro ao salvar saída:", error);
     await sendMessage(chatId, "⚠️ Erro ao salvar a saída.");
   } else {
-    const extra = metodo === "credito" ? `💳 (${metodo.toUpperCase()} - ${cartao})` : `💸 (${metodo})`;
+    const extra =
+      metodo === "credito"
+        ? `💳 (${metodo.toUpperCase()} - ${cartao})`
+        : `💸 (${metodo})`;
     await sendMessage(chatId, `💸 *Saída registrada:*\nR$${valor} ${extra}\n${descricao}`);
   }
 }
 
 async function comandoSaldo(chatId) {
-  const saldo = await calcularSaldo(chatId);
+  const userId = await garantirUsuario(chatId);
+  if (!userId) {
+    await sendMessage(chatId, "⚠️ Você ainda não vinculou sua conta. Gere o token no site e use /vincular <token>.");
+    return;
+  }
+
+  const saldo = await calcularSaldo(userId);
   if (saldo === null) await sendMessage(chatId, "⚠️ Erro ao buscar saldo.");
   else await sendMessage(chatId, `📊 *Seu saldo atual é:*\nR$${saldo}`);
 }
 
 async function comandoResumo(chatId) {
+  const userId = await garantirUsuario(chatId);
+  if (!userId) {
+    await sendMessage(chatId, "⚠️ Sua conta ainda não está vinculada. Gere seu token no site e envie /vincular <token>.");
+    return;
+  }
+
   const { data, error } = await supabase
     .from("transacoes")
     .select("tipo, valor, created_at")
-    .eq("chat_id", chatId)
+    .eq("user_id", userId)
     .gte("created_at", new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
 
   if (error || !data || data.length === 0) {
@@ -190,60 +159,26 @@ async function comandoResumo(chatId) {
   }
 
   const totalEntrada = data.filter(t => t.tipo === "entrada").reduce((acc, t) => acc + Number(t.valor), 0);
-  const totalSaida   = data.filter(t => t.tipo === "saida").reduce((acc, t) => acc + Number(t.valor), 0);
+  const totalSaida = data.filter(t => t.tipo === "saida").reduce((acc, t) => acc + Number(t.valor), 0);
   const saldo = totalEntrada - totalSaida;
 
   await sendMessage(
     chatId,
-    `📅 *Resumo dos últimos 7 dias:*\n\n💰 Entradas: R$${totalEntrada.toFixed(2)}\n` +
-    `💸 Saídas: R$${totalSaida.toFixed(2)}\n📊 Saldo: R$${saldo.toFixed(2)}`
+    `📅 *Resumo dos últimos 7 dias:*\n\n💰 Entradas: R$${totalEntrada.toFixed(2)}\n💸 Saídas: R$${totalSaida.toFixed(2)}\n📊 Saldo: R$${saldo.toFixed(2)}`
   );
 }
 
-async function comandoExtrato(chatId) {
-  const mesAtual = new Date().toISOString().slice(0, 7);
-  const { data, error } = await supabase
-    .from("transacoes")
-    .select("*")
-    .eq("chat_id", chatId)
-    .gte("created_at", `${mesAtual}-01`)
-    .lte("created_at", `${mesAtual}-31`);
 
-  if (error || !data || data.length === 0) {
-    await sendMessage(chatId, "📭 Nenhuma transação neste mês.");
+// ============================================================
+// 🧠 COMANDO INTELIGENTE COM MEMÓRIA
+// ============================================================
+async function comandoInteligente(chatId, text) {
+  const userId = await garantirUsuario(chatId);
+  if (!userId) {
+    await sendMessage(chatId, "⚠️ Sua conta ainda não está vinculada. Gere seu token no site e envie /vincular <token>.");
     return;
   }
 
-  const lista = data
-    .map(t => {
-      const dataFmt = new Date(t.created_at).toLocaleDateString("pt-BR");
-      const simbolo = t.tipo === "entrada" ? "💰" : "💸";
-      return `${simbolo} ${dataFmt} — R$${t.valor} (${t.descricao})`;
-    })
-    .join("\n");
-
-  const totalEntradas = data.filter(t => t.tipo === "entrada").reduce((acc, t) => acc + Number(t.valor), 0);
-  const totalSaidas   = data.filter(t => t.tipo === "saida").reduce((acc, t) => acc + Number(t.valor), 0);
-  const saldo = totalEntradas - totalSaidas;
-
-  await sendMessage(
-    chatId,
-    `📆 *Extrato do mês atual:*\n\n${lista}\n\n` +
-    `💰 Total Entradas: R$${totalEntradas.toFixed(2)}\n` +
-    `💸 Total Saídas: R$${totalSaidas.toFixed(2)}\n` +
-    `📊 Saldo: R$${saldo.toFixed(2)}`
-  );
-}
-
-/* ============================================================
- 🧠 IA com memória
-============================================================ */
-async function comandoLimpar(chatId) {
-  await supabase.from("conversas").delete().eq("chat_id", chatId);
-  await sendMessage(chatId, "🧹 Memória do chat limpa com sucesso!");
-}
-
-async function comandoInteligente(chatId, text) {
   const pergunta = text.trim();
   if (!pergunta) {
     await sendMessage(chatId, "💬 Pode me perguntar algo, por exemplo:\n'Quanto gastei este mês?'");
@@ -253,21 +188,22 @@ async function comandoInteligente(chatId, text) {
   const { data: historico } = await supabase
     .from("conversas")
     .select("role, content")
-    .eq("chat_id", chatId)
+    .eq("user_id", userId)
     .order("created_at", { ascending: true })
     .limit(10);
 
-  const msgs = (historico || []).map(m => ({ role: m.role, content: m.content }));
-  msgs.push({ role: "user", content: pergunta });
+  const contexto = historico?.map((m) => ({ role: m.role, content: m.content })) || [];
+  contexto.push({ role: "user", content: pergunta });
 
   const { data: transacoes } = await supabase
     .from("transacoes")
     .select("tipo, valor, descricao, metodo, created_at")
-    .eq("chat_id", chatId);
+    .eq("user_id", userId);
 
-  const resumo = (transacoes || [])
-    .map(t => `${t.tipo}: R$${t.valor} - ${t.descricao} (${t.metodo || "n/a"}) em ${new Date(t.created_at).toLocaleDateString("pt-BR")}`)
-    .join("\n") || "Nenhuma transação registrada.";
+  const resumo =
+    transacoes?.map(
+      (t) => `${t.tipo}: R$${t.valor} - ${t.descricao} (${t.metodo || "n/a"}) em ${new Date(t.created_at).toLocaleDateString("pt-BR")}`
+    ).join("\n") || "Nenhuma transação registrada.";
 
   const systemPrompt = `
 Você é um assistente financeiro pessoal.
@@ -278,29 +214,85 @@ ${resumo}
 `;
 
   try {
-    const completion = await openai.chat.completions.create({
+    const resposta = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [{ role: "system", content: systemPrompt }, ...msgs],
+      messages: [{ role: "system", content: systemPrompt }, ...contexto],
       temperature: 0.3,
     });
 
-    const out = completion.choices[0].message.content;
+    const conteudo = resposta.choices[0].message.content;
 
     await supabase.from("conversas").insert([
-      { chat_id: chatId, role: "user", content: pergunta },
-      { chat_id: chatId, role: "assistant", content: out },
+      { user_id: userId, role: "user", content: pergunta },
+      { user_id: userId, role: "assistant", content: conteudo },
     ]);
 
-    await sendMessage(chatId, `🤖 ${out}`);
+    await sendMessage(chatId, `🤖 ${conteudo}`);
   } catch (err) {
     console.error("Erro IA:", err);
     await sendMessage(chatId, "⚠️ Erro ao processar sua pergunta com IA.");
   }
 }
 
-/* ============================================================
- 🤖 Webhook Telegram (bloqueio até ativar)
-============================================================ */
+
+// ============================================================
+// 🔗 COMANDO DE VINCULAÇÃO /vincular TOKEN
+// ============================================================
+async function comandoVincular(chatId, text) {
+  const token = text.split(" ")[1];
+  if (!token) {
+    await sendMessage(chatId, "⚠️ Envie o comando no formato: /vincular TLG-XXXXXX");
+    return;
+  }
+
+  const { data: vinculo, error } = await supabase
+    .from("telegram_users")
+    .select("user_id, valid_until")
+    .eq("token", token)
+    .single();
+
+  if (error || !vinculo) {
+    await sendMessage(chatId, "❌ Token inválido ou não encontrado.");
+    return;
+  }
+
+  const expirou = new Date(vinculo.valid_until) < new Date();
+  if (expirou) {
+    await sendMessage(chatId, "⏰ Seu token expirou. Gere um novo no site do FinanceFlow.");
+    return;
+  }
+
+  await supabase
+    .from("telegram_users")
+    .update({ chat_id: chatId, token: null })
+    .eq("user_id", vinculo.user_id);
+
+  await supabase
+    .from("users")
+    .update({ telegram_chat_id: chatId })
+    .eq("id", vinculo.user_id);
+
+  await sendMessage(chatId, "✅ Conta vinculada com sucesso! Agora você pode conversar comigo sobre suas finanças 💬");
+}
+
+
+// ============================================================
+// 🧹 LIMPAR MEMÓRIA
+// ============================================================
+async function comandoLimpar(chatId) {
+  const userId = await garantirUsuario(chatId);
+  if (!userId) {
+    await sendMessage(chatId, "⚠️ Você ainda não vinculou sua conta.");
+    return;
+  }
+  await supabase.from("conversas").delete().eq("user_id", userId);
+  await sendMessage(chatId, "🧹 Memória do chat limpa com sucesso!");
+}
+
+
+// ============================================================
+// 🤖 ROTEAMENTO DO TELEGRAM (CONVERSACIONAL)
+// ============================================================
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const message = req.body.message;
   if (!message) return res.sendStatus(200);
@@ -308,38 +300,16 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = message.text?.trim() || "";
 
   try {
-    // Permite /start e /ativar mesmo sem vínculo
-    const isStartOrAtivar = text.toLowerCase().startsWith("/start") || text.toLowerCase().startsWith("/ativar");
-
-    let userId = null;
-    if (!isStartOrAtivar) {
-      userId = await garantirUsuario(chatId);
-      if (!userId) {
-        await sendMessage(
-          chatId,
-          "🔒 Sua conta ainda não está ativada no Telegram.\n" +
-          "Entre no site, gere seu código e envie aqui:\n`/ativar TG-123456`"
-        );
-        return res.sendStatus(200);
-      }
-      // (opcional) checar plano PRO
-      // const ok = await checarPlano(chatId, userId);
-      // if (!ok) return res.sendStatus(200);
-    }
-
     if (text.toLowerCase() === "/start") {
       await sendMessage(
         chatId,
-        "👋 Oi! Eu sou o assistente financeiro do *FinanceFlow*.\n\n" +
-        "Para começar, ative sua conta enviando o código gerado no site:\n" +
-        "`/ativar TG-123456`"
+        "👋 Oi! Que bom te ver por aqui.\n\nSou seu *assistente financeiro pessoal* — posso te ajudar a entender, organizar e acompanhar suas finanças.\n\nAntes de começarmos, gere seu token no site do *FinanceFlow* e envie aqui:\n\n`/vincular TLG-XXXXXX`\n\nAssim conecto sua conta com segurança 💙"
       );
-    } else if (text.startsWith("/ativar")) await comandoAtivar(chatId, text);
-    else if (text.startsWith("/entrada")) await comandoEntrada(chatId, text, userId);
-    else if (text.startsWith("/saida")) await comandoSaida(chatId, text, userId);
+    } else if (text.startsWith("/vincular")) await comandoVincular(chatId, text);
+    else if (text.startsWith("/entrada")) await comandoEntrada(chatId, text);
+    else if (text.startsWith("/saida")) await comandoSaida(chatId, text);
     else if (text === "/saldo") await comandoSaldo(chatId);
     else if (text === "/resumo") await comandoResumo(chatId);
-    else if (text === "/extrato") await comandoExtrato(chatId);
     else if (text === "/limpar") await comandoLimpar(chatId);
     else await comandoInteligente(chatId, text);
   } catch (err) {
@@ -350,8 +320,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-/* ============================================================
- 🌐 Server
-============================================================ */
+
+// ============================================================
+// 🌐 SERVER
+// ============================================================
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`✅ Server online na porta ${port}`));
