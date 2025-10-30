@@ -1,4 +1,4 @@
-// index.js - versão natural completa e atualizada
+// index.js — FinanceFlow integrado ao Hub da Família do Horizons
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -20,14 +20,18 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 🔧 UTILITÁRIOS
 ============================================================ */
 async function sendMessage(chatId, text) {
-  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
-  });
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+    });
+  } catch (err) {
+    console.error("❌ Erro ao enviar mensagem para Telegram:", err);
+  }
 }
 
-async function garantirUsuario(chatId) {
+async function buscarUsuario(chatId) {
   const { data } = await supabase
     .from("telegram_users")
     .select("user_id")
@@ -36,19 +40,27 @@ async function garantirUsuario(chatId) {
   return data?.user_id || null;
 }
 
+async function buscarFamilyId(userId) {
+  const { data } = await supabase
+    .from("users")
+    .select("family_id")
+    .eq("id", userId)
+    .maybeSingle();
+  return data?.family_id || null;
+}
+
 /* ============================================================
 🧠 INTERPRETAÇÃO NATURAL
 ============================================================ */
 async function interpretarMensagem(text) {
   const prompt = `
-Analise a frase e determine:
-1️⃣ Se é uma "entrada" (dinheiro recebido), "saida" (gasto), "consulta" (pergunta) ou "outros".
-2️⃣ Extraia o valor e a descrição.
+Analise a frase e determine se é uma "entrada", "saida", "consulta" ou "outros".
+Extraia também o valor (número) e uma descrição resumida.
 
-Responda em JSON no formato:
+Responda em JSON:
 {
   "acao": "entrada" | "saida" | "consulta" | "outros",
-  "valor": 1200 ou null,
+  "valor": 150.50 ou null,
   "descricao": "texto breve"
 }
 
@@ -63,54 +75,51 @@ Frase: "${text}"
     });
 
     const raw = result.choices[0].message.content.trim();
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { acao: "outros", valor: null, descricao: text };
-    return JSON.parse(jsonMatch[0]);
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return { acao: "outros", valor: null, descricao: text };
+    return JSON.parse(match[0]);
   } catch (err) {
-    console.error("Erro interpretando mensagem:", err);
+    console.error("⚠️ Erro interpretando mensagem:", err);
     return { acao: "outros", valor: null, descricao: text };
   }
 }
 
 /* ============================================================
-💰 REGISTROS FINANCEIROS
+💰 REGISTROS FINANCEIROS (com suporte ao Hub da Família)
 ============================================================ */
-async function registrarEntrada(chatId, userId, valor, descricao) {
-  const { error } = await supabase.from("transacoes").insert({
-    tipo: "entrada",
-    categoria: "variavel",
-    valor,
-    descricao,
-    chat_id: chatId,
-    user_id: userId,
-  });
-  if (error) {
-    console.error("❌ Erro ao salvar entrada:", error);
-    await sendMessage(chatId, "⚠️ Erro ao salvar entrada.");
-  } else {
-    await sendMessage(chatId, `Entrada registrada: R$${valor}`);
-  }
-}
+async function registrarTransacao({ tipo, valor, descricao, chatId, userId }) {
+  try {
+    const familyId = await buscarFamilyId(userId);
 
-async function registrarSaida(chatId, userId, valor, descricao) {
-  const { error } = await supabase.from("transacoes").insert({
-    tipo: "saida",
-    categoria: "variavel",
-    valor,
-    descricao,
-    chat_id: chatId,
-    user_id: userId,
-  });
-  if (error) {
-    console.error("❌ Erro ao salvar saída:", error);
-    await sendMessage(chatId, "⚠️ Erro ao salvar saída.");
-  } else {
-    await sendMessage(chatId, `Saída registrada: R$${valor}`);
+    const insertObj = {
+      tipo,
+      categoria: "variavel",
+      valor,
+      descricao,
+      chat_id: chatId,
+      user_id: userId,
+    };
+
+    // 🔗 Vincula ao hub familiar se existir
+    if (familyId) insertObj.family_id = familyId;
+
+    const { error } = await supabase.from("transacoes").insert(insertObj);
+
+    if (error) {
+      console.error(`❌ Erro ao salvar ${tipo}:`, error);
+      await sendMessage(chatId, `⚠️ Erro ao salvar ${tipo}.`);
+    } else {
+      const label = tipo === "entrada" ? "Entrada" : "Saída";
+      await sendMessage(chatId, `${label} registrada: R$${valor}`);
+    }
+  } catch (err) {
+    console.error("⚠️ Erro ao registrar transação:", err);
+    await sendMessage(chatId, "⚠️ Ocorreu um erro ao registrar a transação.");
   }
 }
 
 /* ============================================================
-🧮 CONSULTAS E SALDO
+🧮 CONSULTAS / SALDO via IA
 ============================================================ */
 async function responderConsulta(chatId, text) {
   const { data } = await supabase
@@ -127,11 +136,12 @@ async function responderConsulta(chatId, text) {
     ).join("\n") || "Sem transações registradas.";
 
   const prompt = `
-Você é um assistente financeiro.  
-Transações do usuário:
+Você é um assistente financeiro.
+Transações recentes do usuário:
 ${resumo}
 
-Pergunta: "${text}"  
+Pergunta: "${text}"
+
 Responda de forma curta, direta e em português.
 `;
 
@@ -141,16 +151,17 @@ Responda de forma curta, direta e em português.
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
     });
+
     const resposta = result.choices[0].message.content;
     await sendMessage(chatId, `🤖 ${resposta}`);
   } catch (err) {
-    console.error("Erro na consulta IA:", err);
-    await sendMessage(chatId, "⚠️ Erro ao responder sua consulta.");
+    console.error("Erro IA consulta:", err);
+    await sendMessage(chatId, "⚠️ Erro ao responder sua pergunta.");
   }
 }
 
 /* ============================================================
-🤖 WEBHOOK TELEGRAM — modo natural total
+🤖 WEBHOOK TELEGRAM — conversa natural + hub
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const message = req.body.message;
@@ -162,7 +173,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
   console.log("💬 Mensagem recebida:", text);
 
-  const userId = await garantirUsuario(chatId);
+  const userId = await buscarUsuario(chatId);
   if (!userId) {
     await sendMessage(
       chatId,
@@ -175,19 +186,22 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const interpretacao = await interpretarMensagem(text);
     console.log("🧠 Interpretação:", interpretacao);
 
-    if (interpretacao.acao === "entrada" && interpretacao.valor) {
-      await registrarEntrada(chatId, userId, interpretacao.valor, interpretacao.descricao);
-    } else if (interpretacao.acao === "saida" && interpretacao.valor) {
-      await registrarSaida(chatId, userId, interpretacao.valor, interpretacao.descricao);
+    if (["entrada", "saida"].includes(interpretacao.acao) && interpretacao.valor) {
+      await registrarTransacao({
+        tipo: interpretacao.acao,
+        valor: interpretacao.valor,
+        descricao: interpretacao.descricao,
+        chatId,
+        userId,
+      });
     } else if (interpretacao.acao === "consulta") {
       await responderConsulta(chatId, text);
     } else {
-      console.log("💭 Mensagem sem ação detectada:", text);
-      await sendMessage(chatId, "💬 Mensagem registrada, mas não identifiquei uma ação financeira clara.");
+      await sendMessage(chatId, "💬 Não entendi como transação. Pode tentar novamente?");
     }
   } catch (err) {
     console.error("Erro geral:", err);
-    await sendMessage(chatId, "⚠️ Erro ao processar sua mensagem.");
+    await sendMessage(chatId, "⚠️ Ocorreu um erro inesperado.");
   }
 
   res.sendStatus(200);
