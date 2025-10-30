@@ -280,6 +280,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     else if (text.startsWith("/meta")) await comandoMetas(chatId, text);
     else if (text.startsWith("/cartao")) await comandoCartoes(chatId, text);
     else if (text.startsWith("/alerta")) await comandoAlertas(chatId, text);
+    else if (text.startsWith("/inteligente")) await comandoInteligente(chatId, text);
     else await sendMessage(chatId, "👋 Use /ajuda para ver os comandos disponíveis.");
   } catch (err) {
     console.error("Erro no webhook:", err);
