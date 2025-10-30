@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Hub Familiar e Categorias via Telegram
+// index.js — FinanceFlow com IA, Categorias e Aprendizado Adaptativo
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -17,241 +17,244 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ============================================================
-🔧 UTILITÁRIOS BÁSICOS
+🔧 FUNÇÕES BASE
 ============================================================ */
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, reply_markup = null) {
   try {
+    const payload = { chat_id: chatId, text, parse_mode: "Markdown" };
+    if (reply_markup) payload.reply_markup = reply_markup;
     await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+      body: JSON.stringify(payload),
     });
   } catch (err) {
     console.error("❌ Erro ao enviar mensagem:", err);
   }
 }
 
+async function sendCallbackAnswer(callbackQueryId, text = "OK") {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+  });
+}
+
 async function buscarUsuario(chatId) {
   const { data } = await supabase
     .from("telegram_users")
-    .select("user_id, family_id")
+    .select("user_id, family_id, perguntar_essencial")
     .eq("chat_id", chatId)
     .maybeSingle();
   return data || null;
 }
 
 /* ============================================================
-🧠 CLASSIFICAÇÃO DE TIPO E FIXO/VARIÁVEL
+🧠 APRENDIZADO — FUNÇÕES DE MEMÓRIA
 ============================================================ */
-function classificarFixoOuVariavel(texto) {
-  const lower = texto.toLowerCase();
-  const palavrasFixas = [
-    "salário", "salario", "mensal", "fixo", "aluguel", "conta", "assinatura",
-    "internet", "plano", "spotify", "netflix", "academia", "luz", "água", "agua"
-  ];
+async function atualizarMemoriaEssencial(userId, descricao, essencial) {
+  const palavras = extrairPalavrasChave(descricao);
+  for (const palavra of palavras) {
+    const { data: existente } = await supabase
+      .from("memoria_essenciais")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("palavra", palavra)
+      .maybeSingle();
 
-  let tipoFixo = "variavel";
-  for (const palavra of palavrasFixas) {
-    if (lower.includes(palavra)) {
-      tipoFixo = "fixa";
-      break;
+    if (existente) {
+      await supabase
+        .from("memoria_essenciais")
+        .update({
+          essencial,
+          contagem: existente.contagem + 1,
+          ultima_atualizacao: new Date(),
+        })
+        .eq("id", existente.id);
+    } else {
+      await supabase.from("memoria_essenciais").insert({
+        user_id: userId,
+        palavra,
+        essencial,
+      });
     }
-  }
-  return tipoFixo;
-}
-
-/* ============================================================
-🧠 INTERPRETAÇÃO NATURAL (GPT)
-============================================================ */
-async function interpretarMensagem(text) {
-  const prompt = `
-Analise a mensagem abaixo e classifique:
-- "entrada" → ganhos, recebimentos, salário, etc.
-- "saida" → despesas, gastos, compras, contas, etc.
-- "consulta" → perguntas sobre saldo, resumo, etc.
-- "outros" → se não se encaixar.
-
-Extraia também:
-- valor (número)
-- descrição
-- se for possível, identifique se é fixa ou variável.
-
-Retorne JSON assim:
-{"acao":"entrada|saida|consulta|outros","valor":123.45,"descricao":"texto","tipo_fixo":"fixa|variavel|duvida"}
-Mensagem: "${text}"
-  `;
-
-  try {
-    const result = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1,
-    });
-    const json = result.choices[0].message.content.match(/\{[\s\S]*\}/);
-    const parsed = json ? JSON.parse(json[0]) : null;
-
-    if (!parsed) return { acao: "outros", valor: null, descricao: text, tipo_fixo: "duvida" };
-    if (!parsed.tipo_fixo || parsed.tipo_fixo === "duvida") {
-      parsed.tipo_fixo = classificarFixoOuVariavel(text);
-    }
-    return parsed;
-  } catch (err) {
-    console.error("⚠️ Erro IA interpretação:", err);
-    return { acao: "outros", valor: null, descricao: text, tipo_fixo: "duvida" };
   }
 }
 
+function extrairPalavrasChave(texto) {
+  return texto
+    .toLowerCase()
+    .split(/[\s,.;:!?()]+/)
+    .filter((p) => p.length > 3 && isNaN(p))
+    .slice(0, 5); // máximo 5 palavras
+}
+
+async function preverEssencialUsuario(userId, descricao) {
+  const palavras = extrairPalavrasChave(descricao);
+  for (const palavra of palavras) {
+    const { data } = await supabase
+      .from("memoria_essenciais")
+      .select("essencial")
+      .eq("user_id", userId)
+      .eq("palavra", palavra)
+      .maybeSingle();
+    if (data) return data.essencial; // achou uma palavra conhecida
+  }
+  return null;
+}
+
 /* ============================================================
-💰 REGISTRO DE TRANSAÇÃO
+💰 REGISTRO DE TRANSAÇÃO (com aprendizado)
 ============================================================ */
-async function registrarTransacao({ tipo, valor, descricao, tipo_fixo, categoria, chatId, userId, familyId }) {
-  try {
-    const transacao = {
+async function registrarTransacao({
+  tipo,
+  valor,
+  descricao,
+  tipo_fixo,
+  chatId,
+  userId,
+  familyId,
+  perguntarEssencial,
+}) {
+  // 1️⃣ Verificar se o usuário já tem histórico de aprendizado
+  const aprendizado = await preverEssencialUsuario(userId, descricao);
+
+  // 2️⃣ Se IA pessoal não souber, usar heurística geral
+  let essencial = aprendizado;
+  if (essencial === null) {
+    essencial = preverEssencialHeuristico(descricao);
+  }
+
+  // 3️⃣ Inserir transação
+  const { data, error } = await supabase
+    .from("transacoes")
+    .insert({
       tipo,
       valor: Number(valor),
       descricao,
-      tipo_fixo, // fixa ou variavel
-      categoria: categoria || null,
-      chat_id: chatId.toString(),
+      tipo_fixo,
+      essencial,
       user_id: userId,
       family_id: familyId || null,
-    };
-
-    const { error } = await supabase.from("transacoes").insert(transacao);
-
-    if (error) {
-      console.error("❌ Erro ao salvar:", error);
-      await sendMessage(chatId, "⚠️ Erro ao salvar transação.");
-    } else {
-      await sendMessage(
-        chatId,
-        `✅ ${tipo.toUpperCase()} ${tipo_fixo.toUpperCase()} registrada!\n💰 Valor: R$${valor}\n📂 Categoria: ${categoria || "não definida"}`
-      );
-    }
-  } catch (err) {
-    console.error("💥 Erro crítico:", err);
-    await sendMessage(chatId, "⚠️ Erro interno ao registrar transação.");
-  }
-}
-
-/* ============================================================
-📊 CONSULTAS
-============================================================ */
-async function responderConsulta(chatId, text, familyId, userId) {
-  const filtro = familyId ? { family_id: familyId } : { user_id: userId };
-  const { data } = await supabase.from("transacoes").select("*").match(filtro);
-
-  const entradas = data?.filter((t) => t.tipo === "entrada").reduce((a, b) => a + Number(b.valor), 0) || 0;
-  const saidas = data?.filter((t) => t.tipo === "saida").reduce((a, b) => a + Number(b.valor), 0) || 0;
-  const saldo = entradas - saidas;
-
-  if (/saldo|quanto/i.test(text)) {
-    await sendMessage(chatId, `💰 Seu saldo atual é *R$${saldo.toFixed(2)}*`);
-    return;
-  }
-
-  const resumo =
-    data?.map(
-      (t) =>
-        `${t.tipo}: R$${t.valor} - ${t.descricao} (${t.categoria || "sem categoria"})`
-    ).join("\n") || "Sem transações registradas.";
-
-  const prompt = `
-Você é um assistente financeiro.
-Transações do usuário:
-${resumo}
-
-Pergunta: "${text}"
-Responda em português de forma breve e útil.
-`;
-
-  const result = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  await sendMessage(chatId, `🤖 ${result.choices[0].message.content}`);
-}
-
-/* ============================================================
-🏷️ ATUALIZAÇÃO DE CATEGORIA
-============================================================ */
-async function atualizarCategoria(chatId, text, userId) {
-  const match = text.match(/categoria\s+([\w\s]+)\s+(\d+)/i);
-  if (!match) {
-    await sendMessage(chatId, "Use assim: `categoria mercado 123` (123 é o ID da transação)");
-    return;
-  }
-
-  const categoria = match[1].trim();
-  const id = Number(match[2]);
-
-  const { error } = await supabase.from("transacoes").update({ categoria }).eq("id", id).eq("user_id", userId);
+      chat_id: chatId.toString(),
+    })
+    .select("id, essencial")
+    .maybeSingle();
 
   if (error) {
-    await sendMessage(chatId, "⚠️ Erro ao atualizar categoria.");
-  } else {
-    await sendMessage(chatId, `✅ Categoria atualizada para *${categoria}* na transação #${id}`);
+    await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
+    return;
+  }
+
+  await sendMessage(chatId, `✅ ${tipo.toUpperCase()} registrada!\n💰 R$${valor}`);
+
+  // 4️⃣ Perguntar sobre essencialidade, se necessário
+  if (perguntarEssencial && data.essencial === null) {
+    const replyMarkup = {
+      inline_keyboard: [
+        [
+          { text: "🟢 Essencial", callback_data: `ess_${data.id}_true` },
+          { text: "🔴 Não essencial", callback_data: `ess_${data.id}_false` },
+        ],
+      ],
+    };
+    await sendMessage(chatId, "Essa despesa é essencial ou não essencial?", replyMarkup);
   }
 }
 
 /* ============================================================
-🤖 WEBHOOK TELEGRAM — CONVERSA INTELIGENTE
+🧠 Heurística geral (fallback)
+============================================================ */
+function preverEssencialHeuristico(texto) {
+  const lower = texto.toLowerCase();
+  const essenciais = ["supermercado", "aluguel", "energia", "luz", "água", "transporte", "mercado", "gasolina"];
+  const naoEssenciais = ["cinema", "netflix", "spotify", "restaurante", "bar", "viagem", "lazer"];
+  if (essenciais.some((p) => lower.includes(p))) return true;
+  if (naoEssenciais.some((p) => lower.includes(p))) return false;
+  return null;
+}
+
+/* ============================================================
+🔄 CALLBACKS — Categoria e Essencialidade
+============================================================ */
+async function definirEssencialidade(transactionId, valor, chatId, userId) {
+  const essencial = valor === "true";
+  const { data, error } = await supabase
+    .from("transacoes")
+    .update({ essencial })
+    .eq("id", transactionId)
+    .select("descricao")
+    .maybeSingle();
+
+  if (error) {
+    await sendMessage(chatId, "⚠️ Erro ao atualizar essencialidade.");
+  } else {
+    await sendMessage(
+      chatId,
+      essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*"
+    );
+    await atualizarMemoriaEssencial(userId, data.descricao, essencial);
+  }
+}
+
+/* ============================================================
+🤖 WEBHOOK TELEGRAM
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  const msg = req.body.message;
+  const body = req.body;
+
+  // === CALLBACKS ===
+  if (body.callback_query) {
+    const callback = body.callback_query;
+    const chatId = callback.message.chat.id;
+    const data = callback.data;
+    const userData = await buscarUsuario(chatId);
+    const userId = userData?.user_id;
+
+    if (data.startsWith("ess_")) {
+      const [_, transacaoId, valor] = data.split("_");
+      await definirEssencialidade(transacaoId, valor, chatId, userId);
+      await sendCallbackAnswer(callback.id, "Aprendido!");
+    }
+
+    return res.sendStatus(200);
+  }
+
+  // === MENSAGENS ===
+  const msg = body.message;
   if (!msg) return res.sendStatus(200);
 
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  console.log("💬 Mensagem recebida:", text);
-
-  // Ativação
-  if (text.toLowerCase().startsWith("/ativar") || text.toLowerCase().startsWith("/vincular")) {
-    await comandoAtivar(chatId, text);
-    return res.sendStatus(200);
-  }
-
   const userData = await buscarUsuario(chatId);
   if (!userData) {
-    await sendMessage(chatId, "🔒 Sua conta ainda não está vinculada. Gere seu token e envie `/ativar TLG-XXXXXX`");
+    await sendMessage(chatId, "🔒 Sua conta não está vinculada. Use `/ativar TLG-XXXXXX`");
     return res.sendStatus(200);
   }
 
-  const { user_id, family_id } = userData;
+  const { user_id, family_id, perguntar_essencial } = userData;
 
-  // Categoria manual
-  if (text.toLowerCase().startsWith("categoria")) {
-    await atualizarCategoria(chatId, text, user_id);
-    return res.sendStatus(200);
-  }
+  // Registrar transação simples (IA + aprendizado)
+  const acao = text.includes("+") ? "entrada" : text.includes("-") ? "saida" : "outros";
+  const valor = parseFloat(text.replace(/[^\d.,]/g, "").replace(",", ".")) || null;
+  const descricao = text.replace(/[+-]?\d+[,.]?\d*/g, "").trim();
 
-  const interpret = await interpretarMensagem(text);
-  console.log("🧠 Interpretação:", interpret);
-
-  if (["entrada", "saida"].includes(interpret.acao) && interpret.valor) {
-    // Se o tipo fixo for incerto, perguntar
-    if (interpret.tipo_fixo === "duvida") {
-      await sendMessage(chatId, `Essa ${interpret.acao} é *fixa* ou *variável*?`);
-      return res.sendStatus(200);
-    }
-
-    // Registro direto
+  if (["entrada", "saida"].includes(acao) && valor) {
     await registrarTransacao({
-      tipo: interpret.acao,
-      valor: interpret.valor,
-      descricao: interpret.descricao,
-      tipo_fixo: interpret.tipo_fixo,
+      tipo: acao,
+      valor,
+      descricao,
+      tipo_fixo: "variavel",
       chatId,
       userId: user_id,
       familyId: family_id,
+      perguntarEssencial: perguntar_essencial,
     });
-  } else if (interpret.acao === "consulta") {
-    await responderConsulta(chatId, text, family_id, user_id);
   } else {
-    await sendMessage(chatId, "💬 Não entendi. Você pode enviar algo como `+1200 salário` ou `-250 mercado`.");
+    await sendMessage(chatId, "💬 Envie algo como `-300 mercado` ou `+2500 salário`");
   }
 
   res.sendStatus(200);
