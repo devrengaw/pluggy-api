@@ -1,4 +1,4 @@
-// index.js — FinanceFlow integrado ao Hub da Família do Horizons
+// index.js — FinanceFlow integrado ao Hub da Família (Horizons)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -47,6 +47,81 @@ async function buscarFamilyId(userId) {
     .eq("id", userId)
     .maybeSingle();
   return data?.family_id || null;
+}
+
+/* ============================================================
+🔑 ATIVAÇÃO (aceita /ativar ou /vincular)
+============================================================ */
+async function comandoAtivar(chatId, text) {
+  try {
+    const partes = text.trim().split(/\s+/);
+    const token = partes[1]?.trim();
+
+    if (!token) {
+      await sendMessage(chatId, "🔑 Envie o comando assim: `/ativar TG-123456`");
+      return;
+    }
+
+    console.log("🔍 Tentando ativar token:", token);
+
+    const { data: reg, error } = await supabase
+      .from("telegram_tokens")
+      .select("user_id, ativo, valid_until")
+      .eq("token", token)
+      .maybeSingle();
+
+    if (error) {
+      console.error("❌ Erro ao buscar token:", error);
+      await sendMessage(chatId, "⚠️ Erro interno ao validar o token. Tente novamente em alguns minutos.");
+      return;
+    }
+
+    if (!reg) {
+      await sendMessage(chatId, "❌ Código não encontrado. Gere um novo token no site e tente novamente.");
+      return;
+    }
+
+    if (!reg.ativo) {
+      await sendMessage(chatId, "⚠️ Este código já foi utilizado ou está desativado.");
+      return;
+    }
+
+    const now = new Date();
+    const validade = new Date(reg.valid_until);
+    if (validade < now) {
+      await sendMessage(chatId, "⌛ Este código expirou. Gere um novo token no site.");
+      return; // 🔒 NÃO ATIVA SE ESTIVER EXPIRADO
+    }
+
+    // 🔗 Vincular chat ↔ usuário
+    const { error: linkErr } = await supabase.from("telegram_users").upsert(
+      {
+        chat_id: chatId,
+        user_id: reg.user_id,
+        nome: "Usuário FinanceFlow",
+      },
+      { onConflict: "chat_id" }
+    );
+
+    if (linkErr) {
+      console.error("❌ Erro ao vincular usuário:", linkErr);
+      await sendMessage(chatId, "⚠️ Não foi possível concluir a vinculação. Tente novamente.");
+      return;
+    }
+
+    // Desativa token após uso
+    await supabase.from("telegram_tokens").update({ ativo: false }).eq("token", token);
+
+    // Atualiza users.telegram_chat_id
+    await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", reg.user_id);
+
+    console.log("✅ Token vinculado com sucesso ao user_id:", reg.user_id);
+
+    await sendMessage(chatId, "✅ Sua conta foi vinculada com sucesso! Agora você já pode usar todos os comandos do bot.");
+  } catch (err) {
+    console.error("❌ Erro geral no comando /ativar:", err);
+    await sendMessage(chatId, "⚠️ Erro inesperado ao ativar. Tente novamente mais tarde.");
+  }
 }
 
 /* ============================================================
@@ -100,7 +175,6 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId }) {
       user_id: userId,
     };
 
-    // 🔗 Vincula ao hub familiar se existir
     if (familyId) insertObj.family_id = familyId;
 
     const { error } = await supabase.from("transacoes").insert(insertObj);
@@ -166,12 +240,8 @@ Responda de forma curta, direta e em português.
 app.post("/projection", async (req, res) => {
   try {
     const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ error: "user_id é obrigatório" });
 
-    if (!user_id) {
-      return res.status(400).json({ error: "user_id é obrigatório" });
-    }
-
-    // Busca histórico financeiro
     const { data, error } = await supabase
       .from("transacoes")
       .select("tipo, valor, descricao, created_at")
@@ -179,27 +249,21 @@ app.post("/projection", async (req, res) => {
       .order("created_at", { ascending: true });
 
     if (error) throw error;
-    if (!data || data.length === 0) {
-      return res
-        .status(404)
-        .json({ message: "Nenhum dado financeiro encontrado para este usuário." });
-    }
+    if (!data || data.length === 0)
+      return res.status(404).json({ message: "Nenhum dado financeiro encontrado." });
 
     const prompt = `
-Você é um consultor financeiro inteligente.
-Analise o seguinte histórico de transações:
+Você é um consultor financeiro.
+Analise este histórico de transações:
 ${JSON.stringify(data, null, 2)}
 
-Gere uma projeção financeira para os próximos 6 meses com base nos padrões de receita e despesa.
-Inclua:
-- Um resumo explicativo em português simples e consultivo.
-- Um JSON com a estrutura:
-  {
-    "meses": ["Nov/2025", "Dez/2025", "Jan/2026", ...],
-    "saldo_projetado": [3500, 4100, 4700, ...],
-    "recomendacoes": ["Reduzir gastos com lazer", "Aumentar aporte mensal", ...]
-  }
-Retorne primeiro o texto explicativo e depois o JSON.
+Gere uma projeção para os próximos 6 meses:
+{
+  "meses": ["Nov/2025", "Dez/2025", ...],
+  "saldo_projetado": [3500, 4100, ...],
+  "recomendacoes": ["Reduzir gastos com lazer", ...]
+}
+Retorne o texto explicativo e o JSON.
 `;
 
     const result = await openai.chat.completions.create({
@@ -208,16 +272,15 @@ Retorne primeiro o texto explicativo e depois o JSON.
       temperature: 0.2,
     });
 
-    const resposta = result.choices[0].message.content;
-    res.json({ result: resposta });
+    res.json({ result: result.choices[0].message.content });
   } catch (err) {
     console.error("❌ Erro ao gerar projeção:", err);
-    res.status(500).json({ error: "Erro ao gerar projeção financeira." });
+    res.status(500).json({ error: "Erro ao gerar projeção." });
   }
 });
 
 /* ============================================================
-🤖 WEBHOOK TELEGRAM — conversa natural + hub
+🤖 WEBHOOK TELEGRAM — conversa natural + ativação + hub
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const message = req.body.message;
@@ -228,6 +291,12 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   if (!text) return res.sendStatus(200);
 
   console.log("💬 Mensagem recebida:", text);
+
+  // comandos de ativação
+  if (text.toLowerCase().startsWith("/ativar") || text.toLowerCase().startsWith("/vincular")) {
+    await comandoAtivar(chatId, text);
+    return res.sendStatus(200);
+  }
 
   const userId = await buscarUsuario(chatId);
   if (!userId) {
@@ -253,7 +322,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     } else if (interpretacao.acao === "consulta") {
       await responderConsulta(chatId, text);
     } else if (text === "/projecao") {
-      // 🔹 Novo comando para gerar projeção via Telegram
       const response = await fetch(`${process.env.RENDER_URL}/projection`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
