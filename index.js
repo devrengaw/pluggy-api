@@ -16,11 +16,11 @@ app.use(bodyParser.json());
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ============================================================
-// 🔐 GARANTIR USUÁRIO (VÍNCULO TELEGRAM ↔ SUPABASE USER)
-// ============================================================
+/* ============================================================
+ 🔐 GARANTIR USUÁRIO (VÍNCULO TELEGRAM ↔ SUPABASE USER)
+============================================================ */
 async function garantirUsuario(chatId) {
-  // Verifica se o chat_id já está vinculado
+  // Verifica se já existe vínculo do chat
   const { data: vinculo } = await supabase
     .from("telegram_users")
     .select("user_id")
@@ -28,53 +28,64 @@ async function garantirUsuario(chatId) {
     .single();
 
   if (!vinculo) {
-    // Cria novo usuário básico no Supabase
-    const { data: novoUser, error: userError } = await supabase
+    // Verifica se já existe um usuário com o mesmo telegram_chat_id
+    const { data: existente } = await supabase
       .from("users")
-      .insert({
-        nome: "Usuário Telegram",
-        origem: "telegram",
-      })
-      .select()
-      .single();
+      .select("id, auth_user_id")
+      .eq("telegram_chat_id", chatId)
+      .maybeSingle();
 
-    if (userError) {
-      console.error("❌ Erro ao criar usuário:", userError);
-      return null;
+    let userId = existente?.auth_user_id || existente?.id;
+
+    // Se não houver, cria novo usuário base
+    if (!userId) {
+      const { data: novoUser, error: userError } = await supabase
+        .from("users")
+        .insert({
+          nome: "Usuário Telegram",
+          origem: "telegram",
+          telegram_chat_id: chatId,
+        })
+        .select()
+        .single();
+
+      if (userError) {
+        console.error("❌ Erro ao criar usuário:", userError);
+        return null;
+      }
+
+      userId = novoUser.id;
+      console.log("👤 Novo usuário criado:", userId);
     }
 
-    // Faz o vínculo chat_id → user_id
-    await supabase.from("telegram_users").insert({
-      chat_id: chatId,
-      user_id: novoUser.id,
-      nome: "Usuário Telegram",
-    });
+    // Cria ou atualiza o vínculo Telegram ↔ User
+    const { error: linkError } = await supabase.from("telegram_users").upsert(
+      {
+        chat_id: chatId,
+        user_id: userId,
+        nome: "Usuário Telegram",
+      },
+      { onConflict: "chat_id" }
+    );
 
-    // Atualiza a tabela users com o chat_id
+    if (linkError) console.error("Erro ao vincular Telegram:", linkError);
+
+    // Atualiza o campo telegram_chat_id no user
     await supabase
       .from("users")
-      .update({
-        telegram_chat_id: chatId,
-        origem: "telegram",
-      })
-      .eq("id", novoUser.id);
+      .update({ telegram_chat_id: chatId, origem: "telegram" })
+      .eq("id", userId);
 
-    console.log("👤 Novo usuário vinculado:", novoUser.id);
-    return novoUser.id;
+    return userId;
   }
 
-  // Atualiza o chat_id se já houver o usuário
-  await supabase
-    .from("users")
-    .update({ telegram_chat_id: chatId })
-    .eq("id", vinculo.user_id);
-
+  // Se já existia vínculo, retorna o user_id
   return vinculo.user_id;
 }
 
-// ============================================================
-// 🔧 FUNÇÕES UTILITÁRIAS
-// ============================================================
+/* ============================================================
+ 🔧 FUNÇÕES UTILITÁRIAS
+============================================================ */
 async function sendMessage(chatId, text) {
   await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
     method: "POST",
@@ -97,9 +108,9 @@ async function calcularSaldo(chatId) {
   return saldo.toFixed(2);
 }
 
-// ============================================================
-// 💰 COMANDOS FINANCEIROS
-// ============================================================
+/* ============================================================
+ 💰 COMANDOS FINANCEIROS
+============================================================ */
 async function comandoEntrada(chatId, text) {
   const userId = await garantirUsuario(chatId);
   const parts = text.split(" ");
@@ -225,9 +236,9 @@ async function comandoExtrato(chatId) {
   );
 }
 
-// ============================================================
-// 🧠 COMANDO INTELIGENTE COM MEMÓRIA
-// ============================================================
+/* ============================================================
+ 🧠 COMANDO INTELIGENTE COM MEMÓRIA
+============================================================ */
 async function comandoInteligente(chatId, text) {
   const pergunta = text.trim();
   if (!pergunta) {
@@ -291,17 +302,17 @@ ${resumo}
   }
 }
 
-// ============================================================
-// 🧹 LIMPAR MEMÓRIA
-// ============================================================
+/* ============================================================
+ 🧹 LIMPAR MEMÓRIA
+============================================================ */
 async function comandoLimpar(chatId) {
   await supabase.from("conversas").delete().eq("chat_id", chatId);
   await sendMessage(chatId, "🧹 Memória do chat limpa com sucesso!");
 }
 
-// ============================================================
-// 🤖 ROTEAMENTO DO TELEGRAM (CONVERSACIONAL)
-// ============================================================
+/* ============================================================
+ 🤖 ROTEAMENTO DO TELEGRAM
+============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const message = req.body.message;
   if (!message) return res.sendStatus(200);
@@ -309,7 +320,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = message.text?.trim() || "";
 
   try {
-    await garantirUsuario(chatId); // 🔗 garante vínculo do chat com user_id
+    await garantirUsuario(chatId);
 
     if (text.toLowerCase() === "/start") {
       await sendMessage(
@@ -333,8 +344,8 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-// ============================================================
-// 🌐 SERVER
-// ============================================================
+/* ============================================================
+ 🌐 SERVER
+============================================================ */
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`✅ Server online na porta ${port}`));
