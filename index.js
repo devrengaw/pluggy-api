@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import bodyParser from "body-parser";
 import pluggyClient from "./pluggy.js";
 import supabase from "./supabase.js";
+import OpenAI from "openai";
 
 dotenv.config();
 
@@ -13,6 +14,7 @@ app.use(express.json());
 app.use(bodyParser.json());
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ============================================================
 // 🔧 FUNÇÕES UTILITÁRIAS
@@ -164,101 +166,85 @@ async function comandoExtrato(chatId) {
 }
 
 // ============================================================
-// 🗂️ CATEGORIAS, METAS, CARTÕES E ALERTAS
+// 🧠 COMANDO INTELIGENTE COM MEMÓRIA CONTEXTUAL
 // ============================================================
-async function comandoCategorias(chatId, text) {
-  const partes = text.split(" ");
-  const acao = partes[1];
-  const nome = partes.slice(2).join(" ");
+async function comandoInteligente(chatId, text) {
+  const pergunta = text.replace("/inteligente", "").trim();
 
-  if (acao === "adicionar") {
-    const { error } = await supabase.from("categorias").insert({
-      chat_id: chatId,
-      nome,
+  if (!pergunta) {
+    await sendMessage(chatId, "💬 Envie sua pergunta após o comando. Exemplo:\n/inteligente quanto gastei este mês?");
+    return;
+  }
+
+  // 1️⃣ Buscar histórico de conversa do usuário
+  const { data: historico } = await supabase
+    .from("conversas")
+    .select("role, content")
+    .eq("chat_id", chatId)
+    .order("created_at", { ascending: true })
+    .limit(10);
+
+  const contexto = historico?.map((m) => ({
+    role: m.role,
+    content: m.content,
+  })) || [];
+
+  // 2️⃣ Adicionar a nova pergunta
+  contexto.push({ role: "user", content: pergunta });
+
+  // 3️⃣ Buscar transações do usuário
+  const { data: transacoes } = await supabase
+    .from("transacoes")
+    .select("tipo, valor, descricao, metodo, created_at")
+    .eq("chat_id", chatId);
+
+  const resumo =
+    transacoes?.map(
+      (t) =>
+        `${t.tipo}: R$${t.valor} - ${t.descricao} (${t.metodo || "n/a"}) em ${new Date(
+          t.created_at
+        ).toLocaleDateString("pt-BR")}`
+    ).join("\n") || "Nenhuma transação registrada.";
+
+  // 4️⃣ Criar prompt com base nas transações
+  const systemPrompt = `
+Você é um assistente financeiro pessoal. 
+Analise as transações abaixo e responda de forma simples e direta.
+Mantenha contexto da conversa para entender perguntas relacionadas.
+
+Transações conhecidas:
+${resumo}
+`;
+
+  // 5️⃣ Obter resposta do GPT
+  try {
+    const resposta = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "system", content: systemPrompt }, ...contexto],
+      temperature: 0.3,
     });
-    if (error) await sendMessage(chatId, "⚠️ Erro ao adicionar categoria.");
-    else await sendMessage(chatId, `✅ Categoria adicionada: *${nome}*`);
-  } else if (acao === "listar") {
-    const { data } = await supabase.from("categorias").select("nome").eq("chat_id", chatId);
-    if (!data || data.length === 0) {
-      await sendMessage(chatId, "📭 Nenhuma categoria cadastrada.");
-      return;
-    }
-    const lista = data.map((c) => `• ${c.nome}`).join("\n");
-    await sendMessage(chatId, `🗂️ *Suas categorias:*\n${lista}`);
-  } else if (acao === "remover") {
-    await supabase.from("categorias").delete().eq("chat_id", chatId).eq("nome", nome);
-    await sendMessage(chatId, `🗑️ Categoria removida: *${nome}*`);
-  } else {
-    await sendMessage(chatId, "🗂️ Use:\n/categoria adicionar [nome]\n/categoria listar\n/categoria remover [nome]");
+
+    const conteudo = resposta.choices[0].message.content;
+
+    // 6️⃣ Salvar pergunta e resposta no histórico
+    await supabase.from("conversas").insert([
+      { chat_id: chatId, role: "user", content: pergunta },
+      { chat_id: chatId, role: "assistant", content: conteudo },
+    ]);
+
+    await sendMessage(chatId, `🤖 ${conteudo}`);
+  } catch (err) {
+    console.error("Erro IA:", err);
+    await sendMessage(chatId, "⚠️ Erro ao processar sua pergunta.");
   }
 }
 
-async function comandoMetas(chatId, text) {
-  const partes = text.split(" ");
-  const acao = partes[1];
-  const categoria = partes[2];
-  const valor = partes[3];
-
-  if (acao === "definir") {
-    const { error } = await supabase.from("metas").insert({
-      chat_id: chatId,
-      categoria,
-      valor,
-    });
-    if (error) await sendMessage(chatId, "⚠️ Erro ao definir meta.");
-    else await sendMessage(chatId, `🎯 Meta definida: *${categoria}* — R$${valor}`);
-  } else if (acao === "listar") {
-    const { data } = await supabase.from("metas").select("categoria, valor").eq("chat_id", chatId);
-    if (!data || data.length === 0) {
-      await sendMessage(chatId, "📭 Nenhuma meta definida.");
-      return;
-    }
-    const lista = data.map((m) => `• ${m.categoria}: R$${m.valor}`).join("\n");
-    await sendMessage(chatId, `🎯 *Suas metas:*\n${lista}`);
-  } else {
-    await sendMessage(chatId, "🎯 Use:\n/meta definir [categoria] [valor]\n/meta listar");
-  }
-}
-
-async function comandoCartoes(chatId, text) {
-  const partes = text.split(" ");
-  const acao = partes[1];
-  const nome = partes[2];
-  const fechamento = partes[3];
-
-  if (acao === "adicionar") {
-    const { error } = await supabase.from("cartoes").insert({
-      chat_id: chatId,
-      nome,
-      fechamento,
-    });
-    if (error) await sendMessage(chatId, "⚠️ Erro ao adicionar cartão.");
-    else await sendMessage(chatId, `💳 Cartão adicionado: *${nome}* (fechamento dia ${fechamento})`);
-  } else if (acao === "listar") {
-    const { data } = await supabase.from("cartoes").select("nome, fechamento").eq("chat_id", chatId);
-    if (!data || data.length === 0) {
-      await sendMessage(chatId, "📭 Nenhum cartão cadastrado.");
-      return;
-    }
-    const lista = data.map((c) => `• ${c.nome} — fecha dia ${c.fechamento}`).join("\n");
-    await sendMessage(chatId, `💳 *Seus cartões:*\n${lista}`);
-  } else {
-    await sendMessage(chatId, "💳 Use:\n/cartao adicionar [nome] [dia]\n/cartao listar");
-  }
-}
-
-async function comandoAlertas(chatId, text) {
-  const acao = text.split(" ")[1];
-  if (acao === "ativar") {
-    await supabase.from("alertas").upsert({ chat_id: chatId, ativo: true });
-    await sendMessage(chatId, "🔔 Alertas automáticos ativados.");
-  } else if (acao === "desativar") {
-    await supabase.from("alertas").upsert({ chat_id: chatId, ativo: false });
-    await sendMessage(chatId, "🔕 Alertas automáticos desativados.");
-  } else {
-    await sendMessage(chatId, "🔔 Use:\n/alerta ativar\n/alerta desativar");
-  }
+// ============================================================
+// 🧹 LIMPAR MEMÓRIA
+// ============================================================
+async function comandoLimpar(chatId) {
+  await supabase.from("conversas").delete().eq("chat_id", chatId);
+  await sendMessage(chatId, "🧹 Memória do chat limpa com sucesso!");
 }
 
 // ============================================================
@@ -276,11 +262,8 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     else if (text === "/saldo") await comandoSaldo(chatId);
     else if (text === "/resumo") await comandoResumo(chatId);
     else if (text === "/extrato") await comandoExtrato(chatId);
-    else if (text.startsWith("/categoria")) await comandoCategorias(chatId, text);
-    else if (text.startsWith("/meta")) await comandoMetas(chatId, text);
-    else if (text.startsWith("/cartao")) await comandoCartoes(chatId, text);
-    else if (text.startsWith("/alerta")) await comandoAlertas(chatId, text);
     else if (text.startsWith("/inteligente")) await comandoInteligente(chatId, text);
+    else if (text === "/limpar") await comandoLimpar(chatId);
     else await sendMessage(chatId, "👋 Use /ajuda para ver os comandos disponíveis.");
   } catch (err) {
     console.error("Erro no webhook:", err);
@@ -289,66 +272,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
   res.sendStatus(200);
 });
-
-import OpenAI from "openai";
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// 🧠 COMANDO INTELIGENTE — IA FINANCEIRA
-async function comandoInteligente(chatId, text) {
-  const pergunta = text.replace("/inteligente", "").trim();
-
-  if (!pergunta) {
-    await sendMessage(chatId, "💬 Envie sua pergunta após o comando. Exemplo:\n/inteligente quanto gastei em alimentação este mês?");
-    return;
-  }
-
-  // 1️⃣ Buscar todas as transações do usuário
-  const { data, error } = await supabase
-    .from("transacoes")
-    .select("tipo, valor, descricao, metodo, cartao, created_at")
-    .eq("chat_id", chatId);
-
-  if (error || !data || data.length === 0) {
-    await sendMessage(chatId, "📭 Não encontrei dados suficientes para responder.");
-    return;
-  }
-
-  // 2️⃣ Montar contexto dos dados
-  const contexto = data
-    .map((t) => {
-      const dataFormatada = new Date(t.created_at).toLocaleDateString("pt-BR");
-      return `${dataFormatada}: ${t.tipo} R$${t.valor} - ${t.descricao} (${t.metodo || "n/a"})`;
-    })
-    .join("\n");
-
-  // 3️⃣ Pedir para o GPT interpretar e responder
-  const prompt = `
-Você é um assistente financeiro que analisa transações de um usuário.
-Aqui estão as transações:
-
-${contexto}
-
-Pergunta do usuário:
-"${pergunta}"
-
-Responda de forma curta, direta e em português, com valores aproximados em reais (R$).
-`;
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "system", content: "Você é um assistente financeiro pessoal." }, { role: "user", content: prompt }],
-      temperature: 0.2,
-    });
-
-    const resposta = completion.choices[0].message.content;
-    await sendMessage(chatId, `🤖 ${resposta}`);
-  } catch (err) {
-    console.error("Erro IA:", err);
-    await sendMessage(chatId, "⚠️ Erro ao processar a pergunta com IA.");
-  }
-}
-
 
 // ============================================================
 // 🌐 SERVER
