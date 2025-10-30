@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Categorias, Aprendizado Adaptativo e Menu Inteligente
+// index.js — FinanceFlow com IA, Categorias, Aprendizado Adaptativo e Menu Inteligente (versão segura)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -149,7 +149,7 @@ function preverEssencialHeuristico(texto) {
 }
 
 /* ============================================================
-💰 REGISTRO DE TRANSAÇÃO (IA + aprendizado)
+💰 REGISTRO DE TRANSAÇÃO (IA + aprendizado + categoria)
 ============================================================ */
 async function registrarTransacao({
   tipo,
@@ -173,11 +173,12 @@ async function registrarTransacao({
       descricao,
       tipo_fixo,
       essencial,
+      categoria: null, // ✅ nova coluna compatível
       user_id: userId,
       family_id: familyId || null,
       chat_id: chatId.toString(),
     })
-    .select("id, essencial")
+    .select("id, essencial, categoria")
     .maybeSingle();
 
   if (error) {
@@ -189,8 +190,30 @@ async function registrarTransacao({
   const label = tipo === "entrada" ? "Entrada registrada: 💰" : "Saída registrada: 💸";
   await sendMessage(chatId, `${label} R$${valor} (${descricao})`);
 
-  if (perguntarEssencial && data.essencial === null) {
+  // 🗂 Perguntar categoria
+  if (!data.categoria) {
     const replyMarkup = {
+      inline_keyboard: [
+        [
+          { text: "🍽 Alimentação", callback_data: `cat_${data.id}_alimentacao` },
+          { text: "🏠 Moradia", callback_data: `cat_${data.id}_moradia` },
+        ],
+        [
+          { text: "🚗 Transporte", callback_data: `cat_${data.id}_transporte` },
+          { text: "🎉 Lazer", callback_data: `cat_${data.id}_lazer` },
+        ],
+        [
+          { text: "💊 Saúde", callback_data: `cat_${data.id}_saude` },
+          { text: "💼 Trabalho", callback_data: `cat_${data.id}_trabalho` },
+        ],
+      ],
+    };
+    await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
+  }
+
+  // 🧠 Perguntar essencialidade se aplicável
+  if (perguntarEssencial && data.essencial === null) {
+    const replyMarkupEss = {
       inline_keyboard: [
         [
           { text: "🟢 Essencial", callback_data: `ess_${data.id}_true` },
@@ -198,7 +221,7 @@ async function registrarTransacao({
         ],
       ],
     };
-    await sendMessage(chatId, "Essa despesa é essencial?", replyMarkup);
+    await sendMessage(chatId, "Essa despesa é essencial?", replyMarkupEss);
   }
 }
 
@@ -215,11 +238,17 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
     .maybeSingle();
 
   if (!error) {
-    await sendMessage(
-      chatId,
-      essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*"
-    );
+    await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
     await atualizarMemoriaEssencial(userId, data.descricao, essencial);
+  }
+}
+
+async function definirCategoria(transactionId, categoria, chatId) {
+  const { error } = await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
+  if (error) {
+    await sendMessage(chatId, "⚠️ Erro ao salvar categoria.");
+  } else {
+    await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
   }
 }
 
@@ -261,6 +290,13 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       await definirEssencialidade(transacaoId, valor, chatId, userId);
       await sendCallbackAnswer(callback.id, "Aprendido!");
     }
+
+    if (data.startsWith("cat_")) {
+      const [_, transacaoId, categoria] = data.split("_");
+      await definirCategoria(transacaoId, categoria, chatId);
+      await sendCallbackAnswer(callback.id, "Categoria definida!");
+    }
+
     return res.sendStatus(200);
   }
 
