@@ -1,4 +1,4 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Comandos Inteligentes + Vincular Telegram
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Comandos Inteligentes e Vincular Telegram + Keep-Alive
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -17,28 +17,42 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ============================================================
+🏓 ROTA RAIZ (mantém Render ativo e evita erro 502)
+============================================================ */
+app.get("/", (req, res) => {
+  res.status(200).send("✅ FinanceFlow Bot ativo e pronto!");
+});
+
+/* ============================================================
 🔧 UTILITÁRIOS
 ============================================================ */
 async function sendMessage(chatId, text, reply_markup = null) {
   try {
     const payload = { chat_id: chatId, text, parse_mode: "Markdown" };
     if (reply_markup) payload.reply_markup = reply_markup;
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!response.ok) {
+      console.log("⚠️ Falha ao enviar mensagem:", await response.text());
+    }
   } catch (err) {
     console.error("❌ Erro ao enviar mensagem:", err);
   }
 }
 
 async function sendCallbackAnswer(callbackQueryId, text = "OK") {
-  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
-  });
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    });
+  } catch (err) {
+    console.error("Erro ao responder callback:", err);
+  }
 }
 
 async function buscarUsuario(chatId) {
@@ -98,9 +112,9 @@ async function vincularConta(chatId, text) {
 ============================================================ */
 async function interpretarMensagem(text) {
   const prompt = `
-Você é um assistente financeiro.
+Você é um assistente financeiro inteligente.
 Classifique o texto como "entrada", "saida", "consulta", "menu", "saldo", "resumo", "extrato", "projecao" ou "outros".
-Extraia o valor e uma breve descrição.
+Extraia o valor numérico e uma breve descrição.
 
 Responda APENAS JSON:
 {
@@ -130,11 +144,7 @@ Texto: "${text}"
 🧠 MEMÓRIA DE ESSENCIALIDADE
 ============================================================ */
 function extrairPalavrasChave(texto) {
-  return texto
-    .toLowerCase()
-    .split(/[\s,.;:!?()]+/)
-    .filter((p) => p.length > 3 && isNaN(p))
-    .slice(0, 5);
+  return texto.toLowerCase().split(/[\s,.;:!?()]+/).filter(p => p.length > 3 && isNaN(p)).slice(0, 5);
 }
 
 async function atualizarMemoriaEssencial(userId, descricao, essencial) {
@@ -173,8 +183,8 @@ function detectarTipoFixo(descricao) {
   const fixas = ["aluguel", "condominio", "energia", "internet", "telefone", "plano", "mensalidade"];
   const variaveis = ["mercado", "lazer", "restaurante", "compras", "uber", "gasolina", "viagem"];
   const lower = descricao.toLowerCase();
-  if (fixas.some((p) => lower.includes(p))) return "fixa";
-  if (variaveis.some((p) => lower.includes(p))) return "variavel";
+  if (fixas.some(p => lower.includes(p))) return "fixa";
+  if (variaveis.some(p => lower.includes(p))) return "variavel";
   return "variavel";
 }
 
@@ -200,7 +210,7 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
     .maybeSingle();
 
   if (error) {
-    console.error("Erro ao registrar:", error);
+    console.error("❌ Erro ao registrar:", error);
     return await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
   }
 
@@ -238,39 +248,6 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   }
 }
 
-async function comandoSaldo(chatId, userId, familyId) {
-  const { data } = await supabase
-    .from("transacoes")
-    .select("tipo, valor")
-    .or(`user_id.eq.${userId},family_id.eq.${familyId}`);
-  if (!data || data.length === 0) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
-
-  const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor), 0);
-  await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
-}
-
-async function comandoResumo(chatId, userId) {
-  const { data } = await supabase
-    .from("transacoes")
-    .select("tipo, valor, descricao, created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(5);
-
-  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação recente.");
-
-  const linhas = data
-    .map(
-      (t) =>
-        `${t.tipo === "entrada" ? "💰" : "💸"} ${t.descricao} — R$${t.valor} em ${new Date(
-          t.created_at
-        ).toLocaleDateString("pt-BR")}`
-    )
-    .join("\n");
-
-  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
-}
-
 /* ============================================================
 🔄 CALLBACKS
 ============================================================ */
@@ -293,83 +270,89 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
 }
 
 /* ============================================================
-🤖 WEBHOOK TELEGRAM
+🤖 WEBHOOK TELEGRAM (Blindado contra 502)
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  const body = req.body;
+  try {
+    const body = req.body;
 
-  if (body.callback_query) {
-    const cb = body.callback_query;
-    const chatId = cb.message.chat.id;
+    // Callback de botões
+    if (body.callback_query) {
+      const cb = body.callback_query;
+      const chatId = cb.message.chat.id;
+      const user = await buscarUsuario(chatId);
+      const userId = user?.user_id;
+
+      if (cb.data.startsWith("cat_")) {
+        const [_, transacaoId, categoria] = cb.data.split("_");
+        await definirCategoria(transacaoId, categoria, chatId);
+      }
+
+      if (cb.data.startsWith("ess_")) {
+        const [_, transacaoId, valor] = cb.data.split("_");
+        await definirEssencialidade(transacaoId, valor, chatId, userId);
+      }
+
+      await sendCallbackAnswer(cb.id);
+      return res.sendStatus(200);
+    }
+
+    // Mensagens normais
+    const msg = body.message;
+    if (!msg) return res.sendStatus(200);
+    const chatId = msg.chat.id;
+    const text = msg.text?.trim();
+    if (!text) return res.sendStatus(200);
+
+    if (text.toLowerCase().startsWith("/vincular")) {
+      await vincularConta(chatId, text);
+      return res.sendStatus(200);
+    }
+
     const user = await buscarUsuario(chatId);
-    const userId = user?.user_id;
-
-    if (cb.data.startsWith("cat_")) {
-      const [_, transacaoId, categoria] = cb.data.split("_");
-      await definirCategoria(transacaoId, categoria, chatId);
+    if (!user) {
+      await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
+      return res.sendStatus(200);
     }
 
-    if (cb.data.startsWith("ess_")) {
-      const [_, transacaoId, valor] = cb.data.split("_");
-      await definirEssencialidade(transacaoId, valor, chatId, userId);
+    const { user_id, family_id, perguntar_essencial } = user;
+    const interpret = await interpretarMensagem(text);
+    console.log("🧠 Interpretação:", interpret);
+
+    switch (interpret.acao) {
+      case "entrada":
+      case "saida":
+        if (interpret.valor)
+          await registrarTransacao({
+            tipo: interpret.acao,
+            valor: interpret.valor,
+            descricao: interpret.descricao,
+            chatId,
+            userId: user_id,
+            familyId: family_id,
+            perguntarEssencial: perguntar_essencial,
+          });
+        else await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
+        break;
+      case "saldo":
+        await comandoSaldo(chatId, user_id, family_id);
+        break;
+      case "resumo":
+        await comandoResumo(chatId, user_id);
+        break;
+      case "menu":
+      case "/ajuda":
+        await sendMessage(chatId, "💡 Comandos disponíveis:\n/vincular TLG-XXXXXX\n/saldo\n/resumo\n/projecao\n/limpar");
+        break;
+      default:
+        await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
     }
 
-    await sendCallbackAnswer(cb.id);
-    return res.sendStatus(200);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Erro interno no webhook:", err);
+    res.sendStatus(200); // evita 502
   }
-
-  const msg = body.message;
-  if (!msg) return res.sendStatus(200);
-  const chatId = msg.chat.id;
-  const text = msg.text?.trim();
-  if (!text) return res.sendStatus(200);
-
-  // === COMANDO /VINCULAR ===
-  if (text.toLowerCase().startsWith("/vincular")) {
-    await vincularConta(chatId, text);
-    return res.sendStatus(200);
-  }
-
-  const user = await buscarUsuario(chatId);
-  if (!user) {
-    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
-    return res.sendStatus(200);
-  }
-
-  const { user_id, family_id, perguntar_essencial } = user;
-  const interpret = await interpretarMensagem(text);
-  console.log("🧠 Interpretação:", interpret);
-
-  switch (interpret.acao) {
-    case "entrada":
-    case "saida":
-      if (interpret.valor)
-        await registrarTransacao({
-          tipo: interpret.acao,
-          valor: interpret.valor,
-          descricao: interpret.descricao,
-          chatId,
-          userId: user_id,
-          familyId: family_id,
-          perguntarEssencial: perguntar_essencial,
-        });
-      else await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
-      break;
-    case "saldo":
-      await comandoSaldo(chatId, user_id, family_id);
-      break;
-    case "resumo":
-      await comandoResumo(chatId, user_id);
-      break;
-    case "menu":
-    case "/ajuda":
-      await sendMessage(chatId, "💡 Comandos disponíveis:\n/vincular TLG-XXXXXX\n/saldo\n/resumo\n/projecao\n/limpar");
-      break;
-    default:
-      await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
-  }
-
-  res.sendStatus(200);
 });
 
 /* ============================================================
