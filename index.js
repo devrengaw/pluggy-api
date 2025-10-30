@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Categorias, Aprendizado Adaptativo e Menu Inteligente (versão segura)
+// index.js — FinanceFlow com IA, Categorias, Aprendizado Adaptativo e Menu Inteligente (corrigido e completo)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -173,7 +173,7 @@ async function registrarTransacao({
       descricao,
       tipo_fixo,
       essencial,
-      categoria: null, // ✅ nova coluna compatível
+      categoria: null,
       user_id: userId,
       family_id: familyId || null,
       chat_id: chatId.toString(),
@@ -211,8 +211,8 @@ async function registrarTransacao({
     await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
   }
 
-  // 🧠 Perguntar essencialidade se aplicável
-  if (perguntarEssencial && data.essencial === null) {
+  // 🧠 Perguntar essencialidade SOMENTE se for saída
+  if (tipo === "saida" && perguntarEssencial && data.essencial === null) {
     const replyMarkupEss = {
       inline_keyboard: [
         [
