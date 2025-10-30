@@ -31,12 +31,15 @@ async function garantirUsuario(chatId) {
     // Cria novo usuário básico no Supabase
     const { data: novoUser, error: userError } = await supabase
       .from("users")
-      .insert({ nome: "Usuário Telegram", origem: "telegram" })
+      .insert({
+        nome: "Usuário Telegram",
+        origem: "telegram",
+      })
       .select()
       .single();
 
     if (userError) {
-      console.error("Erro ao criar usuário:", userError);
+      console.error("❌ Erro ao criar usuário:", userError);
       return null;
     }
 
@@ -47,9 +50,24 @@ async function garantirUsuario(chatId) {
       nome: "Usuário Telegram",
     });
 
+    // Atualiza a tabela users com o chat_id
+    await supabase
+      .from("users")
+      .update({
+        telegram_chat_id: chatId,
+        origem: "telegram",
+      })
+      .eq("id", novoUser.id);
+
     console.log("👤 Novo usuário vinculado:", novoUser.id);
     return novoUser.id;
   }
+
+  // Atualiza o chat_id se já houver o usuário
+  await supabase
+    .from("users")
+    .update({ telegram_chat_id: chatId })
+    .eq("id", vinculo.user_id);
 
   return vinculo.user_id;
 }
@@ -293,7 +311,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   try {
     await garantirUsuario(chatId); // 🔗 garante vínculo do chat com user_id
 
-    // 👋 Mensagem inicial de boas-vindas
     if (text.toLowerCase() === "/start") {
       await sendMessage(
         chatId,
