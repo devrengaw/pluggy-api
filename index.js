@@ -1,4 +1,4 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Comandos Inteligentes e Vincular Telegram + Keep-Alive
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Comandos Inteligentes, Vincular Telegram e Mensagem de Boas-Vindas (sem Horizons)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -17,7 +17,7 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ============================================================
-🏓 ROTA RAIZ (mantém Render ativo e evita erro 502)
+🏓 ROTA RAIZ — mantém Render ativo e evita erro 502
 ============================================================ */
 app.get("/", (req, res) => {
   res.status(200).send("✅ FinanceFlow Bot ativo e pronto!");
@@ -30,14 +30,13 @@ async function sendMessage(chatId, text, reply_markup = null) {
   try {
     const payload = { chat_id: chatId, text, parse_mode: "Markdown" };
     if (reply_markup) payload.reply_markup = reply_markup;
-    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+
+    const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!response.ok) {
-      console.log("⚠️ Falha ao enviar mensagem:", await response.text());
-    }
+    if (!r.ok) console.log("⚠️ Falha ao enviar mensagem:", await r.text());
   } catch (err) {
     console.error("❌ Erro ao enviar mensagem:", err);
   }
@@ -65,12 +64,15 @@ async function buscarUsuario(chatId) {
 }
 
 /* ============================================================
-🔐 VINCULAR CONTA TELEGRAM → HORIZONS
+🔐 VINCULAR CONTA TELEGRAM → FINANCEFLOW
 ============================================================ */
 async function vincularConta(chatId, text) {
   const token = text.split(" ")[1]?.trim();
   if (!token) {
-    await sendMessage(chatId, "⚠️ Envie assim: `/vincular TLG-XXXXXX`");
+    await sendMessage(
+      chatId,
+      "⚠️ Para vincular sua conta, envie assim:\n`/vincular TLG-XXXXXX`\n\n🔹 O código (token) é gerado no site do *FinanceFlow*, na seção de *Integrações do Telegram*."
+    );
     return;
   }
 
@@ -88,7 +90,7 @@ async function vincularConta(chatId, text) {
   }
 
   if (!tokenData.ativo || (tokenData.valid_until && new Date(tokenData.valid_until) < new Date())) {
-    await sendMessage(chatId, "⚠️ Token expirado ou inativo. Gere um novo no site.");
+    await sendMessage(chatId, "⚠️ Token expirado ou inativo. Gere um novo no site do FinanceFlow.");
     return;
   }
 
@@ -100,11 +102,14 @@ async function vincularConta(chatId, text) {
 
   if (upsertError) {
     console.error("❌ Erro ao vincular usuário:", upsertError);
-    await sendMessage(chatId, "❌ Erro ao vincular conta.");
+    await sendMessage(chatId, "❌ Ocorreu um erro ao vincular sua conta. Tente novamente.");
     return;
   }
 
-  await sendMessage(chatId, "✅ Conta vinculada com sucesso! Agora você pode registrar entradas e saídas.");
+  await sendMessage(
+    chatId,
+    "🎉 *Conta vinculada com sucesso!*\nAgora você pode registrar suas entradas e saídas diretamente por aqui.\n\n💬 Exemplos:\n- `+2500 salário`\n- `-150 mercado`\n\nUse `/menu` para ver todos os comandos disponíveis."
+  );
 }
 
 /* ============================================================
@@ -270,13 +275,13 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
 }
 
 /* ============================================================
-🤖 WEBHOOK TELEGRAM (Blindado contra 502)
+🤖 WEBHOOK TELEGRAM (com boas-vindas FinanceFlow)
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   try {
     const body = req.body;
 
-    // Callback de botões
+    // === CALLBACKS ===
     if (body.callback_query) {
       const cb = body.callback_query;
       const chatId = cb.message.chat.id;
@@ -297,21 +302,33 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Mensagens normais
+    // === MENSAGENS ===
     const msg = body.message;
     if (!msg) return res.sendStatus(200);
+
     const chatId = msg.chat.id;
     const text = msg.text?.trim();
     if (!text) return res.sendStatus(200);
 
+    // 💬 Boas-vindas no /start
+    if (text.toLowerCase() === "/start") {
+      await sendMessage(
+        chatId,
+        "👋 *Bem-vindo ao FinanceFlow!*\n\nSou seu assistente financeiro pessoal. 💙\n\nAntes de começarmos, precisamos vincular sua conta.\n\n🔑 No site do *FinanceFlow*, vá até *Integrações → Telegram* e gere seu token.\n\nDepois envie aqui:\n`/vincular TLG-XXXXXX`\n\nAssim você poderá registrar entradas e saídas com mensagens simples, como:\n`+2500 salário`\n`-150 mercado`\n\nUse `/menu` para ver todos os comandos disponíveis."
+      );
+      return res.sendStatus(200);
+    }
+
+    // === /vincular ===
     if (text.toLowerCase().startsWith("/vincular")) {
       await vincularConta(chatId, text);
       return res.sendStatus(200);
     }
 
+    // === BUSCAR USUÁRIO ===
     const user = await buscarUsuario(chatId);
     if (!user) {
-      await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
+      await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX` para começar.");
       return res.sendStatus(200);
     }
 
@@ -342,7 +359,10 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         break;
       case "menu":
       case "/ajuda":
-        await sendMessage(chatId, "💡 Comandos disponíveis:\n/vincular TLG-XXXXXX\n/saldo\n/resumo\n/projecao\n/limpar");
+        await sendMessage(
+          chatId,
+          "💡 *Comandos disponíveis:*\n/vincular TLG-XXXXXX — Vincular sua conta\n/saldo — Ver saldo atual\n/resumo — Últimas transações\n/projecao — Gerar projeção financeira\n/limpar — Limpar histórico local"
+        );
         break;
       default:
         await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
@@ -351,7 +371,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ Erro interno no webhook:", err);
-    res.sendStatus(200); // evita 502
+    res.sendStatus(200);
   }
 });
 
