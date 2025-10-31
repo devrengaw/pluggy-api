@@ -1,4 +1,4 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Comandos Inteligentes
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Comandos Inteligentes e Teste de 30 dias (Plano PRO)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -197,39 +197,6 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   }
 }
 
-async function comandoSaldo(chatId, userId, familyId) {
-  const { data } = await supabase
-    .from("transacoes")
-    .select("tipo, valor")
-    .or(`user_id.eq.${userId},family_id.eq.${familyId}`);
-  if (!data || data.length === 0) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
-
-  const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor), 0);
-  await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
-}
-
-async function comandoResumo(chatId, userId) {
-  const { data } = await supabase
-    .from("transacoes")
-    .select("tipo, valor, descricao, created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(5);
-
-  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação recente.");
-
-  const linhas = data
-    .map(
-      (t) =>
-        `${t.tipo === "entrada" ? "💰" : "💸"} ${t.descricao} — R$${t.valor} em ${new Date(
-          t.created_at
-        ).toLocaleDateString("pt-BR")}`
-    )
-    .join("\n");
-
-  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
-}
-
 /* ============================================================
 🔄 CALLBACKS
 ============================================================ */
@@ -250,6 +217,75 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
   await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
   await atualizarMemoriaEssencial(userId, data.descricao, essencial);
 }
+
+/* ============================================================
+🆓 TESTE DE 30 DIAS (PLANO PRO)
+============================================================ */
+app.post("/ativar-teste", async (req, res) => {
+  const { user_id } = req.body;
+  try {
+    // Verifica se já tem teste ativo
+    const { data: usuario } = await supabase
+      .from("users")
+      .select("plano, trial_ativo, trial_expira_em")
+      .eq("id", user_id)
+      .maybeSingle();
+
+    if (!usuario) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+
+    if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
+      return res.json({
+        success: false,
+        message: "Você já possui um teste ativo.",
+        expira_em: usuario.trial_expira_em,
+      });
+    }
+
+    // Ativa o teste de 30 dias
+    const { error } = await supabase.from("users").update({
+      plano: "pro",
+      trial_ativo: true,
+      trial_expira_em: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    }).eq("id", user_id);
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      message: "✅ Teste de 30 dias ativado com sucesso!",
+      expira_em: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+  } catch (err) {
+    console.error("Erro ao ativar teste:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Verifica status do teste
+app.get("/verificar-teste/:user_id", async (req, res) => {
+  const { user_id } = req.params;
+  try {
+    const { data } = await supabase
+      .from("users")
+      .select("plano, trial_ativo, trial_expira_em")
+      .eq("id", user_id)
+      .maybeSingle();
+
+    if (!data) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+
+    const ativo = data.trial_ativo && new Date(data.trial_expira_em) > new Date();
+
+    res.json({
+      success: true,
+      plano: ativo ? "pro (teste ativo)" : data.plano,
+      trial_ativo: ativo,
+      expira_em: data.trial_expira_em,
+    });
+  } catch (err) {
+    console.error("Erro ao verificar teste:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 /* ============================================================
 🤖 WEBHOOK TELEGRAM
@@ -283,7 +319,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  // Buscar usuário
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/ativar TLG-XXXXXX`");
@@ -294,7 +329,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const interpret = await interpretarMensagem(text);
   console.log("🧠 Interpretação:", interpret);
 
-  // Rotas IA
   switch (interpret.acao) {
     case "entrada":
     case "saida":
