@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Aprendizado, Relatórios Inteligentes e Telegram (corrigido family_id)
+// index.js — FinanceFlow com IA, Aprendizado, Relatórios Inteligentes e Telegram (com compatibilidade Hub Família)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -88,12 +88,21 @@ async function comandoAtivar(chatId, text) {
       return;
     }
 
-    // Vincula o chat ↔ usuário (corrigido: family_id sempre nulo)
+    // ✅ Busca o family_id real do usuário, se vier do Hub Família
+    const { data: userInfo } = await supabase
+      .from("users")
+      .select("family_id")
+      .eq("id", reg.user_id)
+      .maybeSingle();
+
+    const familyIdValido = userInfo?.family_id || null;
+
+    // Vincula o chat ↔ usuário
     const { error: linkErr } = await supabase.from("telegram_users").upsert(
       {
         chat_id: chatId,
         user_id: reg.user_id,
-        family_id: null, // 🔥 evita erro de FK (families)
+        family_id: familyIdValido, // ✅ Mantém vínculo familiar se existir
         nome: "Usuário FinanceFlow",
         perguntar_essencial: true,
         frequencia_relatorio: "mensal",
@@ -348,7 +357,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  // Ativação / vínculo
+  // ✅ Comando de ativação
   if (text.toLowerCase().startsWith("/ativar") || text.toLowerCase().startsWith("/vincular")) {
     await comandoAtivar(chatId, text);
     return res.sendStatus(200);
