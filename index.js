@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Aprendizado, Relatórios Inteligentes e Telegram
+// index.js — FinanceFlow com IA, Aprendizado, Relatórios Inteligentes e Telegram (versão completa)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -50,6 +50,75 @@ async function buscarUsuario(chatId) {
     .eq("chat_id", chatId)
     .maybeSingle();
   return data || null;
+}
+
+/* ============================================================
+🔑 ATIVAÇÃO DO TELEGRAM (/ativar ou /vincular)
+============================================================ */
+async function comandoAtivar(chatId, text) {
+  try {
+    const partes = text.trim().split(/\s+/);
+    const token = partes[1]?.trim();
+
+    if (!token) {
+      await sendMessage(chatId, "🔑 Envie o comando assim: `/ativar TLG-123456` ou `/vincular TLG-123456`");
+      return;
+    }
+
+    const { data: reg, error } = await supabase
+      .from("telegram_tokens")
+      .select("user_id, ativo, valid_until")
+      .eq("token", token)
+      .maybeSingle();
+
+    if (error || !reg) {
+      await sendMessage(chatId, "❌ Código inválido. Gere um novo token no site.");
+      return;
+    }
+
+    if (!reg.ativo) {
+      await sendMessage(chatId, "⚠️ Este código já foi usado ou está desativado.");
+      return;
+    }
+
+    const now = new Date();
+    const validade = new Date(reg.valid_until);
+    if (validade < now) {
+      await sendMessage(chatId, "⌛ Este código expirou. Gere um novo no site.");
+      return;
+    }
+
+    // Vincula o chat ↔ usuário
+    const { error: linkErr } = await supabase.from("telegram_users").upsert(
+      {
+        chat_id: chatId,
+        user_id: reg.user_id,
+        nome: "Usuário FinanceFlow",
+        perguntar_essencial: true,
+        frequencia_relatorio: "mensal",
+      },
+      { onConflict: "chat_id" }
+    );
+
+    if (linkErr) {
+      console.error("Erro ao vincular:", linkErr);
+      await sendMessage(chatId, "⚠️ Falha ao vincular sua conta. Tente novamente mais tarde.");
+      return;
+    }
+
+    // Desativa o token após o uso
+    await supabase.from("telegram_tokens").update({ ativo: false }).eq("token", token);
+    await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", reg.user_id);
+
+    await sendMessage(
+      chatId,
+      "✅ Sua conta foi vinculada com sucesso!\nAgora você pode registrar transações, consultar saldo e configurar relatórios 📊"
+    );
+
+  } catch (err) {
+    console.error("💥 Erro em comandoAtivar:", err);
+    await sendMessage(chatId, "❌ Ocorreu um erro ao tentar vincular sua conta.");
+  }
 }
 
 /* ============================================================
@@ -171,7 +240,7 @@ function preverEssencialHeuristico(texto) {
 }
 
 /* ============================================================
-🔄 CALLBACKS — Essencialidade
+🔄 CALLBACKS — Essencialidade e Frequência
 ============================================================ */
 async function definirEssencialidade(transactionId, valor, chatId, userId) {
   const essencial = valor === "true";
@@ -191,6 +260,13 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
     );
     await atualizarMemoriaEssencial(userId, data.descricao, essencial);
   }
+}
+
+async function salvarFrequencia(userId, frequencia) {
+  await supabase
+    .from("telegram_users")
+    .update({ frequencia_relatorio: frequencia })
+    .eq("user_id", userId);
 }
 
 /* ============================================================
@@ -265,30 +341,6 @@ ${relatorio.dica}
 }
 
 /* ============================================================
-🗓️ ESCOLHA DE FREQUÊNCIA DE RELATÓRIOS
-============================================================ */
-async function configurarFrequencia(chatId, userId) {
-  const replyMarkup = {
-    inline_keyboard: [
-      [
-        { text: "📅 Semanal", callback_data: `freq_${userId}_semanal` },
-        { text: "🗓 Quinzenal", callback_data: `freq_${userId}_quinzenal` },
-        { text: "📆 Mensal", callback_data: `freq_${userId}_mensal` },
-      ],
-      [{ text: "✅ Receber todos", callback_data: `freq_${userId}_todos` }],
-    ],
-  };
-  await sendMessage(chatId, "Escolha com que frequência deseja receber seus relatórios:", replyMarkup);
-}
-
-async function salvarFrequencia(userId, frequencia) {
-  await supabase
-    .from("telegram_users")
-    .update({ frequencia_relatorio: frequencia })
-    .eq("user_id", userId);
-}
-
-/* ============================================================
 🤖 WEBHOOK TELEGRAM
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
@@ -325,6 +377,12 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
+  // Ativação / vínculo
+  if (text.toLowerCase().startsWith("/ativar") || text.toLowerCase().startsWith("/vincular")) {
+    await comandoAtivar(chatId, text);
+    return res.sendStatus(200);
+  }
+
   const userData = await buscarUsuario(chatId);
   if (!userData) {
     await sendMessage(chatId, "🔒 Sua conta não está vinculada. Use `/ativar TLG-XXXXXX`");
@@ -335,11 +393,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
   if (text === "/resumo") {
     await enviarRelatorioTelegram(user_id, chatId);
-    return res.sendStatus(200);
-  }
-
-  if (text === "/frequencia") {
-    await configurarFrequencia(chatId, user_id);
     return res.sendStatus(200);
   }
 
@@ -366,20 +419,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 });
 
 /* ============================================================
-🌐 ENDPOINTS PARA DASHBOARD
-============================================================ */
-app.get("/relatorio", async (req, res) => {
-  const { user_id } = req.query;
-  const relatorio = await gerarRelatorio(user_id);
-  if (!relatorio) return res.status(404).json({ message: "Sem dados para o período." });
-  res.json(relatorio);
-});
-
-/* ============================================================
 ⏰ CRONS AUTOMÁTICOS
 ============================================================ */
 cron.schedule("0 9 * * 1", async () => {
-  // Envia semanalmente às segundas, 9h
   const { data } = await supabase.from("telegram_users").select("chat_id, user_id, frequencia_relatorio");
   for (const u of data || []) {
     if (["semanal", "todos"].includes(u.frequencia_relatorio))
@@ -388,7 +430,6 @@ cron.schedule("0 9 * * 1", async () => {
 });
 
 cron.schedule("0 9 1,15 * *", async () => {
-  // Envia quinzenal (dias 1 e 15)
   const { data } = await supabase.from("telegram_users").select("chat_id, user_id, frequencia_relatorio");
   for (const u of data || []) {
     if (["quinzenal", "todos"].includes(u.frequencia_relatorio))
@@ -397,7 +438,6 @@ cron.schedule("0 9 1,15 * *", async () => {
 });
 
 cron.schedule("0 9 1 * *", async () => {
-  // Envia mensalmente todo dia 1
   const { data } = await supabase.from("telegram_users").select("chat_id, user_id, frequencia_relatorio");
   for (const u of data || []) {
     if (["mensal", "todos"].includes(u.frequencia_relatorio))
