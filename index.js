@@ -1,4 +1,4 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Planos e Teste de 30 Dias
+=// index.js - FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar (Plano PRO liberado)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -40,64 +40,6 @@ async function sendCallbackAnswer(callbackQueryId, text = "OK") {
     body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
   });
 }
-
-/* ============================================================
-💳 VERIFICAÇÃO DE PLANO (FREE / PRO / FAMÍLIA / TESTE)
-============================================================ */
-async function verificarPlanoAtivo(userId) {
-  const { data: user, error } = await supabase
-    .from("users")
-    .select("plan, trial_ends_at, trial_plan")
-    .eq("id", userId)
-    .maybeSingle();
-
-  if (error || !user) return { ativo: false, motivo: "Usuário não encontrado" };
-
-  const agora = new Date();
-  const trialAtivo = user.trial_ends_at && new Date(user.trial_ends_at) > agora;
-
-  if (trialAtivo) {
-    return {
-      ativo: true,
-      tipo: "teste",
-      plano: user.trial_plan || "pro",
-      expiraEm: user.trial_ends_at,
-    };
-  }
-
-  if (user.plan === "pro" || user.plan === "familia") {
-    return { ativo: true, tipo: "pago", plano: user.plan };
-  }
-
-  if (user.plan === "free") {
-    return { ativo: true, tipo: "gratuito", plano: "free" };
-  }
-
-  return { ativo: false, motivo: "Plano não reconhecido" };
-}
-
-/* ============================================================
-🧪 ENDPOINT PARA ATIVAR TESTE DE 30 DIAS
-============================================================ */
-app.post("/ativar-teste", async (req, res) => {
-  const { user_id, plano } = req.body; // plano: 'pro' ou 'familia'
-  if (!user_id) return res.status(400).json({ error: "Usuário não informado." });
-
-  const { error } = await supabase
-    .from("users")
-    .update({
-      trial_plan: plano,
-      trial_ends_at: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30),
-    })
-    .eq("id", user_id);
-
-  if (error) {
-    console.error("Erro ao ativar teste:", error);
-    return res.status(500).json({ error: "Falha ao ativar teste." });
-  }
-
-  res.json({ success: true, message: `Teste de 30 dias do plano ${plano} ativado!` });
-});
 
 /* ============================================================
 🔍 BUSCAR USUÁRIO TELEGRAM
@@ -197,14 +139,9 @@ function detectarTipoFixo(descricao) {
 }
 
 /* ============================================================
-💰 TRANSAÇÕES E RELATÓRIOS (com checagem de plano)
+💰 TRANSAÇÕES E RELATÓRIOS (tudo liberado)
 ============================================================ */
 async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
-  const plano = await verificarPlanoAtivo(userId);
-  if (!plano.ativo) {
-    return await sendMessage(chatId, "🚫 Seu plano expirou ou não está ativo. Acesse o site para renovar.");
-  }
-
   const tipo_fixo = detectarTipoFixo(descricao);
   const { data, error } = await supabase
     .from("transacoes")
@@ -228,7 +165,7 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   }
 
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
-  await sendMessage(chatId, `${label}: R$${valor} — ${descricao} (${plano.plano})`);
+  await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
 
   const replyMarkup = {
     inline_keyboard: [
@@ -262,9 +199,6 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
 }
 
 async function comandoSaldo(chatId, userId, familyId) {
-  const plano = await verificarPlanoAtivo(userId);
-  if (!plano.ativo) return await sendMessage(chatId, "🚫 Seu teste expirou ou plano inativo.");
-
   const { data } = await supabase
     .from("transacoes")
     .select("tipo, valor")
@@ -272,13 +206,10 @@ async function comandoSaldo(chatId, userId, familyId) {
   if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
 
   const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor), 0);
-  await sendMessage(chatId, `📊 *Saldo atual:* R$${total.toFixed(2)} (${plano.plano})`);
+  await sendMessage(chatId, `📊 *Saldo atual:* R$${total.toFixed(2)}`);
 }
 
 async function comandoResumo(chatId, userId) {
-  const plano = await verificarPlanoAtivo(userId);
-  if (!plano.ativo) return await sendMessage(chatId, "🚫 Seu teste expirou ou plano inativo.");
-
   const { data } = await supabase
     .from("transacoes")
     .select("tipo, valor, descricao, created_at")
@@ -297,7 +228,7 @@ async function comandoResumo(chatId, userId) {
     )
     .join("\n");
 
-  await sendMessage(chatId, `🧾 *Últimas transações (${plano.plano}):*\n${linhas}`);
+  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
 }
 
 /* ============================================================
@@ -395,4 +326,8 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-/* ================================================*
+/* ============================================================
+🌐 SERVER
+============================================================ */
+const port = process.env.PORT || 10000;
+app.listen(port, () => console.log(`✅ Server online na porta ${port}`));
