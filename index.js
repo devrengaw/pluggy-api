@@ -1,5 +1,3 @@
-Salve o index atual e me de mande um manual atualizado de uso do sistema todo
-
 // index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Comandos Inteligentes
 import express from "express";
 import cors from "cors";
