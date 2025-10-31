@@ -1,4 +1,4 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Boas-vindas
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Boas-vindas Pós-Ativação
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -56,7 +56,7 @@ async function buscarUsuario(chatId) {
 async function interpretarMensagem(text) {
   const prompt = `
 Você é um assistente financeiro.
-Classifique o texto como "entrada", "saida", "consulta", "menu", "saldo", "resumo", "extrato", "projecao" ou "outros".
+Classifique o texto como "entrada", "saida", "consulta", "menu", "saldo", "resumo", "extrato", "projecao", "ativar" ou "outros".
 Extraia o valor e uma breve descrição.
 
 Responda APENAS JSON:
@@ -124,7 +124,7 @@ async function atualizarMemoriaEssencial(userId, descricao, essencial) {
 }
 
 /* ============================================================
-💡 Heurística: Fixa / Variável / Essencial
+💡 Heurística: Fixa / Variável
 ============================================================ */
 function detectarTipoFixo(descricao) {
   const fixas = ["aluguel", "condominio", "energia", "internet", "telefone", "plano", "mensalidade"];
@@ -195,67 +195,12 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   }
 }
 
-async function comandoSaldo(chatId, userId, familyId) {
-  const { data } = await supabase
-    .from("transacoes")
-    .select("tipo, valor")
-    .or(`user_id.eq.${userId},family_id.eq.${familyId}`);
-  if (!data || data.length === 0) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
-
-  const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor), 0);
-  await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
-}
-
-async function comandoResumo(chatId, userId) {
-  const { data } = await supabase
-    .from("transacoes")
-    .select("tipo, valor, descricao, created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(5);
-
-  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação recente.");
-
-  const linhas = data
-    .map(
-      (t) =>
-        `${t.tipo === "entrada" ? "💰" : "💸"} ${t.descricao} — R$${t.valor} em ${new Date(
-          t.created_at
-        ).toLocaleDateString("pt-BR")}`
-    )
-    .join("\n");
-
-  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
-}
-
-/* ============================================================
-🔄 CALLBACKS
-============================================================ */
-async function definirCategoria(transactionId, categoria, chatId) {
-  await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
-  await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
-}
-
-async function definirEssencialidade(transactionId, valor, chatId, userId) {
-  const essencial = valor === "true";
-  const { data } = await supabase
-    .from("transacoes")
-    .update({ essencial })
-    .eq("id", transactionId)
-    .select("descricao")
-    .maybeSingle();
-
-  await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
-  await atualizarMemoriaEssencial(userId, data.descricao, essencial);
-}
-
 /* ============================================================
 🤖 WEBHOOK TELEGRAM
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
 
-  // ✅ CALLBACKS (botões)
   if (body.callback_query) {
     const cb = body.callback_query;
     const chatId = cb.message.chat.id;
@@ -264,12 +209,21 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
     if (cb.data.startsWith("cat_")) {
       const [_, transacaoId, categoria] = cb.data.split("_");
-      await definirCategoria(transacaoId, categoria, chatId);
+      await supabase.from("transacoes").update({ categoria }).eq("id", transacaoId);
+      await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
     }
 
     if (cb.data.startsWith("ess_")) {
       const [_, transacaoId, valor] = cb.data.split("_");
-      await definirEssencialidade(transacaoId, valor, chatId, userId);
+      const essencial = valor === "true";
+      const { data } = await supabase
+        .from("transacoes")
+        .update({ essencial })
+        .eq("id", transacaoId)
+        .select("descricao")
+        .maybeSingle();
+      await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
+      await atualizarMemoriaEssencial(userId, data.descricao, essencial);
     }
 
     await sendCallbackAnswer(cb.id);
@@ -295,7 +249,49 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // Buscar usuário
+  // ✅ Ativação de token
+  if (text.startsWith("/ativar")) {
+    const token = text.split(" ")[1];
+    if (!token) {
+      await sendMessage(chatId, "⚠️ Use o formato correto: `/ativar TLG-XXXXXX`");
+      return res.sendStatus(200);
+    }
+
+    const { data: tokenData } = await supabase
+      .from("telegram_tokens")
+      .select("user_id, ativo, valid_until")
+      .eq("token", token)
+      .maybeSingle();
+
+    if (!tokenData || !tokenData.ativo || new Date(tokenData.valid_until) < new Date()) {
+      await sendMessage(chatId, "🚫 Token inválido ou expirado. Gere um novo no seu painel FinanceFlow.");
+      return res.sendStatus(200);
+    }
+
+    await supabase.from("telegram_users").upsert({
+      user_id: tokenData.user_id,
+      chat_id: chatId,
+      perguntar_essencial: true,
+    });
+
+    await supabase
+      .from("telegram_tokens")
+      .update({ ativo: false })
+      .eq("token", token);
+
+    // 🆕 Mensagem acolhedora após ativação
+    await sendMessage(
+      chatId,
+      `✅ *Conta conectada com sucesso!*\n\n🎉 Agora você pode usar todos os comandos do *FinanceFlow* diretamente por aqui.\n\n` +
+        `💬 Exemplos de mensagens:\n- "recebi 3000 de salário"\n- "gastei 120 no mercado"\n- "/saldo" para ver seu saldo atual\n\n` +
+        `🧠 A partir de agora, suas finanças estão integradas com o painel FinanceFlow.\n` +
+        `Vamos juntos organizar seus gastos e metas! 🚀`
+    );
+
+    return res.sendStatus(200);
+  }
+
+  // Usuário precisa estar vinculado
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/ativar TLG-XXXXXX`");
