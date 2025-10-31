@@ -249,48 +249,46 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // ✅ Ativação de token
-  if (text.startsWith("/ativar")) {
-    const token = text.split(" ")[1];
-    if (!token) {
-      await sendMessage(chatId, "⚠️ Use o formato correto: `/ativar TLG-XXXXXX`");
-      return res.sendStatus(200);
-    }
+// ✅ Ativação de token (aceita /ativar e /vincular)
+if (text.startsWith("/ativar") || text.startsWith("/vincular")) {
+  const partes = text.split(" ");
+  const token = partes[1];
 
-    const { data: tokenData } = await supabase
-      .from("telegram_tokens")
-      .select("user_id, ativo, valid_until")
-      .eq("token", token)
-      .maybeSingle();
-
-    if (!tokenData || !tokenData.ativo || new Date(tokenData.valid_until) < new Date()) {
-      await sendMessage(chatId, "🚫 Token inválido ou expirado. Gere um novo no seu painel FinanceFlow.");
-      return res.sendStatus(200);
-    }
-
-    await supabase.from("telegram_users").upsert({
-      user_id: tokenData.user_id,
-      chat_id: chatId,
-      perguntar_essencial: true,
-    });
-
-    await supabase
-      .from("telegram_tokens")
-      .update({ ativo: false })
-      .eq("token", token);
-
-    // 🆕 Mensagem acolhedora após ativação
-    await sendMessage(
-      chatId,
-      `✅ *Conta conectada com sucesso!*\n\n🎉 Agora você pode usar todos os comandos do *FinanceFlow* diretamente por aqui.\n\n` +
-        `💬 Exemplos de mensagens:\n- "recebi 3000 de salário"\n- "gastei 120 no mercado"\n- "/saldo" para ver seu saldo atual\n\n` +
-        `🧠 A partir de agora, suas finanças estão integradas com o painel FinanceFlow.\n` +
-        `Vamos juntos organizar seus gastos e metas! 🚀`
-    );
-
+  if (!token) {
+    await sendMessage(chatId, "⚠️ Use o formato correto: `/ativar TLG-XXXXXX` ou `/vincular TLG-XXXXXX`");
     return res.sendStatus(200);
   }
 
+  const { data: tokenData } = await supabase
+    .from("telegram_tokens")
+    .select("user_id, ativo, valid_until")
+    .eq("token", token)
+    .maybeSingle();
+
+  if (!tokenData || !tokenData.ativo || new Date(tokenData.valid_until) < new Date()) {
+    await sendMessage(chatId, "🚫 Token inválido ou expirado. Gere um novo no seu painel FinanceFlow.");
+    return res.sendStatus(200);
+  }
+
+  await supabase.from("telegram_users").upsert({
+    user_id: tokenData.user_id,
+    chat_id: chatId,
+    perguntar_essencial: true,
+  });
+
+  await supabase.from("telegram_tokens").update({ ativo: false }).eq("token", token);
+
+  // 🆕 Mensagem acolhedora após ativação
+  await sendMessage(
+    chatId,
+    `✅ *Conta conectada com sucesso!*\n\n🎉 Agora você pode usar todos os comandos do *FinanceFlow* diretamente por aqui.\n\n` +
+      `💬 Exemplos de mensagens:\n- "recebi 3000 de salário"\n- "gastei 120 no mercado"\n- "/saldo" para ver seu saldo atual\n\n` +
+      `🧠 A partir de agora, suas finanças estão integradas com o painel FinanceFlow.\n` +
+      `Vamos juntos organizar seus gastos e metas! 🚀`
+  );
+
+  return res.sendStatus(200);
+}
   // Usuário precisa estar vinculado
   const user = await buscarUsuario(chatId);
   if (!user) {
