@@ -1,11 +1,11 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Teste de 30 dias (Plano PRO) e Realtime Supabase ↔ Telegram ↔ Horizons
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Teste de 30 dias (Plano PRO), Token Telegram e Realtime Supabase ↔ Telegram ↔ Horizons
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
 import supabase from "./supabase.js";
 import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js"; // 🔁 para o realtime
+import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
 
 dotenv.config();
 
@@ -125,7 +125,7 @@ async function atualizarMemoriaEssencial(userId, descricao, essencial) {
 }
 
 /* ============================================================
-💡 Heurística: Fixa / Variável / Essencial
+💡 Heurística: Fixa / Variável
 ============================================================ */
 function detectarTipoFixo(descricao) {
   const fixas = ["aluguel", "condominio", "energia", "internet", "telefone", "plano", "mensalidade"];
@@ -137,7 +137,7 @@ function detectarTipoFixo(descricao) {
 }
 
 /* ============================================================
-💰 TRANSAÇÕES E RELATÓRIOS
+💰 TRANSAÇÕES
 ============================================================ */
 async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
   const tipo_fixo = detectarTipoFixo(descricao);
@@ -167,28 +167,40 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
 }
 
 /* ============================================================
-🔄 CALLBACKS
+🔑 GERAR TOKEN TELEGRAM
 ============================================================ */
-async function definirCategoria(transactionId, categoria, chatId) {
-  await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
-  await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
-}
+app.post("/gerar-token-telegram", async (req, res) => {
+  const { user_id } = req.body;
+  try {
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, family_id")
+      .eq("id", user_id)
+      .maybeSingle();
 
-async function definirEssencialidade(transactionId, valor, chatId, userId) {
-  const essencial = valor === "true";
-  const { data } = await supabase
-    .from("transacoes")
-    .update({ essencial })
-    .eq("id", transactionId)
-    .select("descricao")
-    .maybeSingle();
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+    }
 
-  await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
-  await atualizarMemoriaEssencial(userId, data.descricao, essencial);
-}
+    const token = `TLG-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    const { error } = await supabase.from("telegram_tokens").insert({
+      token,
+      user_id: user.id,
+      family_id: user.family_id,
+      ativo: true,
+      valid_until: new Date(Date.now() + 15 * 60 * 1000),
+    });
+
+    if (error) throw error;
+    res.json({ success: true, message: "✅ Token gerado com sucesso!", token });
+  } catch (err) {
+    console.error("Erro ao gerar token Telegram:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 /* ============================================================
-🆓 TESTE DE 30 DIAS (PLANO PRO)
+🆓 TESTE DE 30 DIAS
 ============================================================ */
 app.post("/ativar-teste", async (req, res) => {
   const { user_id } = req.body;
@@ -200,13 +212,8 @@ app.post("/ativar-teste", async (req, res) => {
       .maybeSingle();
 
     if (!usuario) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
-
     if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
-      return res.json({
-        success: false,
-        message: "Você já possui um teste ativo.",
-        expira_em: usuario.trial_expira_em,
-      });
+      return res.json({ success: false, message: "Você já possui um teste ativo.", expira_em: usuario.trial_expira_em });
     }
 
     const { error } = await supabase.from("users").update({
@@ -217,11 +224,7 @@ app.post("/ativar-teste", async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
-      success: true,
-      message: "✅ Teste de 30 dias ativado com sucesso!",
-      expira_em: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-    });
+    res.json({ success: true, message: "✅ Teste de 30 dias ativado com sucesso!" });
   } catch (err) {
     console.error("Erro ao ativar teste:", err);
     res.status(500).json({ success: false, error: err.message });
@@ -232,19 +235,12 @@ app.post("/ativar-teste", async (req, res) => {
 🔁 SUPABASE REALTIME ↔ TELEGRAM ↔ FRONT
 ============================================================ */
 const supabaseRealtime = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
-
-// Escuta alterações em transações (inserir, atualizar, excluir)
 supabaseRealtime
   .channel("transacoes_updates")
   .on("postgres_changes", { event: "*", schema: "public", table: "transacoes" }, async (payload) => {
-    console.log("📡 Mudança detectada em transações:", payload.eventType, payload.new);
-
-    // Envia notificação no Telegram (apenas novas transações)
+    console.log("📡 Mudança detectada:", payload.eventType, payload.new);
     if (payload.eventType === "INSERT" && payload.new?.chat_id) {
-      await sendMessage(
-        payload.new.chat_id,
-        `🔄 Atualização detectada no sistema!\n💰 ${payload.new.tipo} de R$${payload.new.valor} — ${payload.new.descricao}`
-      );
+      await sendMessage(payload.new.chat_id, `💬 Nova transação: ${payload.new.descricao} — R$${payload.new.valor}`);
     }
   })
   .subscribe();
@@ -254,7 +250,6 @@ supabaseRealtime
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
-
   if (body.callback_query) {
     const cb = body.callback_query;
     const chatId = cb.message.chat.id;
@@ -263,7 +258,8 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
     if (cb.data.startsWith("cat_")) {
       const [_, transacaoId, categoria] = cb.data.split("_");
-      await definirCategoria(transacaoId, categoria, chatId);
+      await supabase.from("transacoes").update({ categoria }).eq("id", transacaoId);
+      await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
     }
 
     if (cb.data.startsWith("ess_")) {
@@ -283,13 +279,12 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
   const user = await buscarUsuario(chatId);
   if (!user) {
-    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/ativar TLG-XXXXXX`");
+    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
     return res.sendStatus(200);
   }
 
   const { user_id, family_id, perguntar_essencial } = user;
   const interpret = await interpretarMensagem(text);
-  console.log("🧠 Interpretação:", interpret);
 
   switch (interpret.acao) {
     case "entrada":
