@@ -1,10 +1,11 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Comandos Inteligentes e Teste de 30 dias (Plano PRO)
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Teste de 30 dias (Plano PRO) e Realtime Supabase ↔ Telegram ↔ Horizons
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
 import supabase from "./supabase.js";
 import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js"; // 🔁 para o realtime
 
 dotenv.config();
 
@@ -163,38 +164,6 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
 
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
   await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
-
-  // 🗂 Categoria
-  const replyMarkup = {
-    inline_keyboard: [
-      [
-        { text: "🍽 Alimentação", callback_data: `cat_${data.id}_alimentacao` },
-        { text: "🏠 Moradia", callback_data: `cat_${data.id}_moradia` },
-      ],
-      [
-        { text: "🚗 Transporte", callback_data: `cat_${data.id}_transporte` },
-        { text: "🎉 Lazer", callback_data: `cat_${data.id}_lazer` },
-      ],
-      [
-        { text: "💊 Saúde", callback_data: `cat_${data.id}_saude` },
-        { text: "💼 Trabalho", callback_data: `cat_${data.id}_trabalho` },
-      ],
-    ],
-  };
-  await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
-
-  // 🧠 Pergunta “essencial” apenas se for SAÍDA
-  if (tipo === "saida" && perguntarEssencial) {
-    const replyMarkupEss = {
-      inline_keyboard: [
-        [
-          { text: "🟢 Essencial", callback_data: `ess_${data.id}_true` },
-          { text: "🔴 Não essencial", callback_data: `ess_${data.id}_false` },
-        ],
-      ],
-    };
-    await sendMessage(chatId, "Essa despesa é essencial?", replyMarkupEss);
-  }
 }
 
 /* ============================================================
@@ -224,7 +193,6 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
 app.post("/ativar-teste", async (req, res) => {
   const { user_id } = req.body;
   try {
-    // Verifica se já tem teste ativo
     const { data: usuario } = await supabase
       .from("users")
       .select("plano, trial_ativo, trial_expira_em")
@@ -241,7 +209,6 @@ app.post("/ativar-teste", async (req, res) => {
       });
     }
 
-    // Ativa o teste de 30 dias
     const { error } = await supabase.from("users").update({
       plano: "pro",
       trial_ativo: true,
@@ -261,31 +228,26 @@ app.post("/ativar-teste", async (req, res) => {
   }
 });
 
-// Verifica status do teste
-app.get("/verificar-teste/:user_id", async (req, res) => {
-  const { user_id } = req.params;
-  try {
-    const { data } = await supabase
-      .from("users")
-      .select("plano, trial_ativo, trial_expira_em")
-      .eq("id", user_id)
-      .maybeSingle();
+/* ============================================================
+🔁 SUPABASE REALTIME ↔ TELEGRAM ↔ FRONT
+============================================================ */
+const supabaseRealtime = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
 
-    if (!data) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+// Escuta alterações em transações (inserir, atualizar, excluir)
+supabaseRealtime
+  .channel("transacoes_updates")
+  .on("postgres_changes", { event: "*", schema: "public", table: "transacoes" }, async (payload) => {
+    console.log("📡 Mudança detectada em transações:", payload.eventType, payload.new);
 
-    const ativo = data.trial_ativo && new Date(data.trial_expira_em) > new Date();
-
-    res.json({
-      success: true,
-      plano: ativo ? "pro (teste ativo)" : data.plano,
-      trial_ativo: ativo,
-      expira_em: data.trial_expira_em,
-    });
-  } catch (err) {
-    console.error("Erro ao verificar teste:", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+    // Envia notificação no Telegram (apenas novas transações)
+    if (payload.eventType === "INSERT" && payload.new?.chat_id) {
+      await sendMessage(
+        payload.new.chat_id,
+        `🔄 Atualização detectada no sistema!\n💰 ${payload.new.tipo} de R$${payload.new.valor} — ${payload.new.descricao}`
+      );
+    }
+  })
+  .subscribe();
 
 /* ============================================================
 🤖 WEBHOOK TELEGRAM
@@ -343,16 +305,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
           perguntarEssencial: perguntar_essencial,
         });
       else await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
-      break;
-    case "saldo":
-      await comandoSaldo(chatId, user_id, family_id);
-      break;
-    case "resumo":
-      await comandoResumo(chatId, user_id);
-      break;
-    case "menu":
-    case "/ajuda":
-      await sendMessage(chatId, "💡 Comandos disponíveis:\n/saldo\n/resumo\n/projecao\n/limpar");
       break;
     default:
       await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
