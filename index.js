@@ -1,4 +1,4 @@
-// index.js — FinanceFlow com IA, Aprendizado, Relatórios Inteligentes e Telegram (versão completa)
+// index.js — FinanceFlow com IA, Aprendizado, Relatórios Inteligentes e Telegram (corrigido family_id)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -88,11 +88,12 @@ async function comandoAtivar(chatId, text) {
       return;
     }
 
-    // Vincula o chat ↔ usuário
+    // Vincula o chat ↔ usuário (corrigido: family_id sempre nulo)
     const { error: linkErr } = await supabase.from("telegram_users").upsert(
       {
         chat_id: chatId,
         user_id: reg.user_id,
+        family_id: null, // 🔥 evita erro de FK (families)
         nome: "Usuário FinanceFlow",
         perguntar_essencial: true,
         frequencia_relatorio: "mensal",
@@ -237,36 +238,6 @@ function preverEssencialHeuristico(texto) {
   if (essenciais.some((p) => lower.includes(p))) return true;
   if (naoEssenciais.some((p) => lower.includes(p))) return false;
   return null;
-}
-
-/* ============================================================
-🔄 CALLBACKS — Essencialidade e Frequência
-============================================================ */
-async function definirEssencialidade(transactionId, valor, chatId, userId) {
-  const essencial = valor === "true";
-  const { data, error } = await supabase
-    .from("transacoes")
-    .update({ essencial })
-    .eq("id", transactionId)
-    .select("descricao")
-    .maybeSingle();
-
-  if (error) {
-    await sendMessage(chatId, "⚠️ Erro ao atualizar essencialidade.");
-  } else {
-    await sendMessage(
-      chatId,
-      essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*"
-    );
-    await atualizarMemoriaEssencial(userId, data.descricao, essencial);
-  }
-}
-
-async function salvarFrequencia(userId, frequencia) {
-  await supabase
-    .from("telegram_users")
-    .update({ frequencia_relatorio: frequencia })
-    .eq("user_id", userId);
 }
 
 /* ============================================================
