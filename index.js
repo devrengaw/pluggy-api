@@ -1,11 +1,10 @@
-// index.js — FinanceFlow com IA, Aprendizado, Relatórios Inteligentes e Telegram (com compatibilidade Hub Família)
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar e Comandos Inteligentes
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
 import supabase from "./supabase.js";
 import OpenAI from "openai";
-import cron from "node-cron";
 
 dotenv.config();
 
@@ -15,7 +14,6 @@ app.use(express.json());
 app.use(bodyParser.json());
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const RENDER_URL = process.env.RENDER_URL;
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ============================================================
@@ -46,94 +44,56 @@ async function sendCallbackAnswer(callbackQueryId, text = "OK") {
 async function buscarUsuario(chatId) {
   const { data } = await supabase
     .from("telegram_users")
-    .select("user_id, family_id, perguntar_essencial, frequencia_relatorio")
+    .select("user_id, family_id, perguntar_essencial")
     .eq("chat_id", chatId)
     .maybeSingle();
   return data || null;
 }
 
 /* ============================================================
-🔑 ATIVAÇÃO DO TELEGRAM (/ativar ou /vincular)
+🧠 INTERPRETAÇÃO NATURAL (IA)
 ============================================================ */
-async function comandoAtivar(chatId, text) {
+async function interpretarMensagem(text) {
+  const prompt = `
+Você é um assistente financeiro.
+Classifique o texto como "entrada", "saida", "consulta", "menu", "saldo", "resumo", "extrato", "projecao" ou "outros".
+Extraia o valor e uma breve descrição.
+
+Responda APENAS JSON:
+{
+  "acao": "...",
+  "valor": número ou null,
+  "descricao": "texto breve"
+}
+
+Texto: "${text}"
+`;
   try {
-    const partes = text.trim().split(/\s+/);
-    const token = partes[1]?.trim();
-
-    if (!token) {
-      await sendMessage(chatId, "🔑 Envie o comando assim: `/ativar TLG-123456` ou `/vincular TLG-123456`");
-      return;
-    }
-
-    const { data: reg, error } = await supabase
-      .from("telegram_tokens")
-      .select("user_id, ativo, valid_until")
-      .eq("token", token)
-      .maybeSingle();
-
-    if (error || !reg) {
-      await sendMessage(chatId, "❌ Código inválido. Gere um novo token no site.");
-      return;
-    }
-
-    if (!reg.ativo) {
-      await sendMessage(chatId, "⚠️ Este código já foi usado ou está desativado.");
-      return;
-    }
-
-    const now = new Date();
-    const validade = new Date(reg.valid_until);
-    if (validade < now) {
-      await sendMessage(chatId, "⌛ Este código expirou. Gere um novo no site.");
-      return;
-    }
-
-    // ✅ Busca o family_id real do usuário, se vier do Hub Família
-    const { data: userInfo } = await supabase
-      .from("users")
-      .select("family_id")
-      .eq("id", reg.user_id)
-      .maybeSingle();
-
-    const familyIdValido = userInfo?.family_id || null;
-
-    // Vincula o chat ↔ usuário
-    const { error: linkErr } = await supabase.from("telegram_users").upsert(
-      {
-        chat_id: chatId,
-        user_id: reg.user_id,
-        family_id: familyIdValido, // ✅ Mantém vínculo familiar se existir
-        nome: "Usuário FinanceFlow",
-        perguntar_essencial: true,
-        frequencia_relatorio: "mensal",
-      },
-      { onConflict: "chat_id" }
-    );
-
-    if (linkErr) {
-      console.error("Erro ao vincular:", linkErr);
-      await sendMessage(chatId, "⚠️ Falha ao vincular sua conta. Tente novamente mais tarde.");
-      return;
-    }
-
-    // Desativa o token após o uso
-    await supabase.from("telegram_tokens").update({ ativo: false }).eq("token", token);
-    await supabase.from("users").update({ telegram_chat_id: chatId }).eq("id", reg.user_id);
-
-    await sendMessage(
-      chatId,
-      "✅ Sua conta foi vinculada com sucesso!\nAgora você pode registrar transações, consultar saldo e configurar relatórios 📊"
-    );
-
+    const result = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+    });
+    const raw = result.choices[0].message.content.trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    return match ? JSON.parse(match[0]) : { acao: "outros", valor: null, descricao: text };
   } catch (err) {
-    console.error("💥 Erro em comandoAtivar:", err);
-    await sendMessage(chatId, "❌ Ocorreu um erro ao tentar vincular sua conta.");
+    console.error("⚠️ Erro IA:", err);
+    return { acao: "outros", valor: null, descricao: text };
   }
 }
 
 /* ============================================================
-🧠 MEMÓRIA DE APRENDIZADO
+🧠 MEMÓRIA DE ESSENCIALIDADE
 ============================================================ */
+function extrairPalavrasChave(texto) {
+  return texto
+    .toLowerCase()
+    .split(/[\s,.;:!?()]+/)
+    .filter((p) => p.length > 3 && isNaN(p))
+    .slice(0, 5);
+}
+
 async function atualizarMemoriaEssencial(userId, descricao, essencial) {
   const palavras = extrairPalavrasChave(descricao);
   for (const palavra of palavras) {
@@ -163,45 +123,23 @@ async function atualizarMemoriaEssencial(userId, descricao, essencial) {
   }
 }
 
-function extrairPalavrasChave(texto) {
-  return texto
-    .toLowerCase()
-    .split(/[\s,.;:!?()]+/)
-    .filter((p) => p.length > 3 && isNaN(p))
-    .slice(0, 5);
-}
-
-async function preverEssencialUsuario(userId, descricao) {
-  const palavras = extrairPalavrasChave(descricao);
-  for (const palavra of palavras) {
-    const { data } = await supabase
-      .from("memoria_essenciais")
-      .select("essencial")
-      .eq("user_id", userId)
-      .eq("palavra", palavra)
-      .maybeSingle();
-    if (data) return data.essencial;
-  }
-  return null;
+/* ============================================================
+💡 Heurística: Fixa / Variável / Essencial
+============================================================ */
+function detectarTipoFixo(descricao) {
+  const fixas = ["aluguel", "condominio", "energia", "internet", "telefone", "plano", "mensalidade"];
+  const variaveis = ["mercado", "lazer", "restaurante", "compras", "uber", "gasolina", "viagem"];
+  const lower = descricao.toLowerCase();
+  if (fixas.some((p) => lower.includes(p))) return "fixa";
+  if (variaveis.some((p) => lower.includes(p))) return "variavel";
+  return "variavel";
 }
 
 /* ============================================================
-💰 REGISTRO DE TRANSAÇÃO (com aprendizado)
+💰 TRANSAÇÕES E RELATÓRIOS
 ============================================================ */
-async function registrarTransacao({
-  tipo,
-  valor,
-  descricao,
-  tipo_fixo,
-  chatId,
-  userId,
-  familyId,
-  perguntarEssencial,
-}) {
-  const aprendizado = await preverEssencialUsuario(userId, descricao);
-  let essencial = aprendizado;
-  if (essencial === null) essencial = preverEssencialHeuristico(descricao);
-
+async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
+  const tipo_fixo = detectarTipoFixo(descricao);
   const { data, error } = await supabase
     .from("transacoes")
     .insert({
@@ -209,23 +147,45 @@ async function registrarTransacao({
       valor: Number(valor),
       descricao,
       tipo_fixo,
-      essencial,
+      categoria: null,
+      essencial: null,
       user_id: userId,
       family_id: familyId || null,
       chat_id: chatId.toString(),
     })
-    .select("id, essencial")
+    .select("id, tipo")
     .maybeSingle();
 
   if (error) {
-    await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
-    return;
+    console.error("Erro ao registrar:", error);
+    return await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
   }
 
-  await sendMessage(chatId, `✅ ${tipo.toUpperCase()} registrada!\n💰 R$${valor}`);
+  const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
+  await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
 
-  if (perguntarEssencial && data.essencial === null) {
-    const replyMarkup = {
+  // 🗂 Categoria
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: "🍽 Alimentação", callback_data: `cat_${data.id}_alimentacao` },
+        { text: "🏠 Moradia", callback_data: `cat_${data.id}_moradia` },
+      ],
+      [
+        { text: "🚗 Transporte", callback_data: `cat_${data.id}_transporte` },
+        { text: "🎉 Lazer", callback_data: `cat_${data.id}_lazer` },
+      ],
+      [
+        { text: "💊 Saúde", callback_data: `cat_${data.id}_saude` },
+        { text: "💼 Trabalho", callback_data: `cat_${data.id}_trabalho` },
+      ],
+    ],
+  };
+  await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
+
+  // 🧠 Pergunta “essencial” apenas se for SAÍDA
+  if (tipo === "saida" && perguntarEssencial) {
+    const replyMarkupEss = {
       inline_keyboard: [
         [
           { text: "🟢 Essencial", callback_data: `ess_${data.id}_true` },
@@ -233,91 +193,62 @@ async function registrarTransacao({
         ],
       ],
     };
-    await sendMessage(chatId, "Essa despesa é essencial ou não essencial?", replyMarkup);
+    await sendMessage(chatId, "Essa despesa é essencial?", replyMarkupEss);
   }
 }
 
-/* ============================================================
-🧠 Heurística padrão
-============================================================ */
-function preverEssencialHeuristico(texto) {
-  const lower = texto.toLowerCase();
-  const essenciais = ["supermercado", "aluguel", "energia", "luz", "água", "transporte", "mercado", "gasolina"];
-  const naoEssenciais = ["cinema", "netflix", "spotify", "restaurante", "bar", "viagem", "lazer"];
-  if (essenciais.some((p) => lower.includes(p))) return true;
-  if (naoEssenciais.some((p) => lower.includes(p))) return false;
-  return null;
-}
-
-/* ============================================================
-📊 RELATÓRIOS IA
-============================================================ */
-async function gerarRelatorio(userId) {
-  const hoje = new Date();
-  const inicioMes = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
-  const fimMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
-
+async function comandoSaldo(chatId, userId, familyId) {
   const { data } = await supabase
     .from("transacoes")
-    .select("tipo, valor, essencial")
+    .select("tipo, valor")
+    .or(`user_id.eq.${userId},family_id.eq.${familyId}`);
+  if (!data || data.length === 0) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
+
+  const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor), 0);
+  await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
+}
+
+async function comandoResumo(chatId, userId) {
+  const { data } = await supabase
+    .from("transacoes")
+    .select("tipo, valor, descricao, created_at")
     .eq("user_id", userId)
-    .gte("created_at", inicioMes.toISOString())
-    .lte("created_at", fimMes.toISOString());
+    .order("created_at", { ascending: false })
+    .limit(5);
 
-  if (!data?.length) return null;
+  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação recente.");
 
-  const entradas = data.filter(t => t.tipo === "entrada").reduce((a, b) => a + b.valor, 0);
-  const saidas = data.filter(t => t.tipo === "saida").reduce((a, b) => a + b.valor, 0);
-  const essenciais = data.filter(t => t.essencial === true).reduce((a, b) => a + b.valor, 0);
-  const naoEssenciais = data.filter(t => t.essencial === false).reduce((a, b) => a + b.valor, 0);
-  const percentualEssenciais = saidas ? ((essenciais / saidas) * 100).toFixed(1) : 0;
-  const percentualNao = saidas ? ((naoEssenciais / saidas) * 100).toFixed(1) : 0;
+  const linhas = data
+    .map(
+      (t) =>
+        `${t.tipo === "entrada" ? "💰" : "💸"} ${t.descricao} — R$${t.valor} em ${new Date(
+          t.created_at
+        ).toLocaleDateString("pt-BR")}`
+    )
+    .join("\n");
 
-  const prompt = `
-Usuário teve ${percentualNao}% de gastos não essenciais este mês.
-Gere uma dica curta e prática de economia em português, em uma frase objetiva.
-  `;
-  const result = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const dica = result.choices[0].message.content.trim();
-
-  return {
-    mes: hoje.toLocaleString("pt-BR", { month: "long", year: "numeric" }),
-    entradas,
-    saidas,
-    essenciais,
-    naoEssenciais,
-    percentualEssenciais,
-    percentualNao,
-    dica,
-  };
+  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
 }
 
 /* ============================================================
-💬 ENVIO DE RELATÓRIOS PELO TELEGRAM
+🔄 CALLBACKS
 ============================================================ */
-async function enviarRelatorioTelegram(userId, chatId) {
-  const relatorio = await gerarRelatorio(userId);
-  if (!relatorio) {
-    await sendMessage(chatId, "📭 Nenhuma transação registrada neste período.");
-    return;
-  }
+async function definirCategoria(transactionId, categoria, chatId) {
+  await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
+  await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
+}
 
-  const texto = `
-📊 *Relatório FinanceFlow — ${relatorio.mes}*
+async function definirEssencialidade(transactionId, valor, chatId, userId) {
+  const essencial = valor === "true";
+  const { data } = await supabase
+    .from("transacoes")
+    .update({ essencial })
+    .eq("id", transactionId)
+    .select("descricao")
+    .maybeSingle();
 
-💰 Entradas: R$ ${relatorio.entradas.toFixed(2)}
-💸 Saídas: R$ ${relatorio.saidas.toFixed(2)}
-🟢 Essenciais: ${relatorio.percentualEssenciais}%
-🔴 Não essenciais: ${relatorio.percentualNao}%
-
-💡 Dica da IA:
-${relatorio.dica}
-  `;
-  await sendMessage(chatId, texto);
+  await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
+  await atualizarMemoriaEssencial(userId, data.descricao, essencial);
 }
 
 /* ============================================================
@@ -326,103 +257,74 @@ ${relatorio.dica}
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
 
-  // CALLBACKS
   if (body.callback_query) {
-    const callback = body.callback_query;
-    const chatId = callback.message.chat.id;
-    const data = callback.data;
-    const userData = await buscarUsuario(chatId);
-    const userId = userData?.user_id;
+    const cb = body.callback_query;
+    const chatId = cb.message.chat.id;
+    const user = await buscarUsuario(chatId);
+    const userId = user?.user_id;
 
-    if (data.startsWith("ess_")) {
-      const [_, transacaoId, valor] = data.split("_");
+    if (cb.data.startsWith("cat_")) {
+      const [_, transacaoId, categoria] = cb.data.split("_");
+      await definirCategoria(transacaoId, categoria, chatId);
+    }
+
+    if (cb.data.startsWith("ess_")) {
+      const [_, transacaoId, valor] = cb.data.split("_");
       await definirEssencialidade(transacaoId, valor, chatId, userId);
-      await sendCallbackAnswer(callback.id, "Aprendido!");
     }
 
-    if (data.startsWith("freq_")) {
-      const [_, uid, freq] = data.split("_");
-      await salvarFrequencia(uid, freq);
-      await sendMessage(chatId, `📅 Relatórios configurados como *${freq}*.`);
-      await sendCallbackAnswer(callback.id, "Configuração salva!");
-    }
-
+    await sendCallbackAnswer(cb.id);
     return res.sendStatus(200);
   }
 
-  // MENSAGENS
   const msg = body.message;
   if (!msg) return res.sendStatus(200);
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  // ✅ Comando de ativação
-  if (text.toLowerCase().startsWith("/ativar") || text.toLowerCase().startsWith("/vincular")) {
-    await comandoAtivar(chatId, text);
+  // Buscar usuário
+  const user = await buscarUsuario(chatId);
+  if (!user) {
+    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/ativar TLG-XXXXXX`");
     return res.sendStatus(200);
   }
 
-  const userData = await buscarUsuario(chatId);
-  if (!userData) {
-    await sendMessage(chatId, "🔒 Sua conta não está vinculada. Use `/ativar TLG-XXXXXX`");
-    return res.sendStatus(200);
-  }
+  const { user_id, family_id, perguntar_essencial } = user;
+  const interpret = await interpretarMensagem(text);
+  console.log("🧠 Interpretação:", interpret);
 
-  const { user_id, family_id, perguntar_essencial } = userData;
-
-  if (text === "/resumo") {
-    await enviarRelatorioTelegram(user_id, chatId);
-    return res.sendStatus(200);
-  }
-
-  const acao = text.includes("+") ? "entrada" : text.includes("-") ? "saida" : "outros";
-  const valor = parseFloat(text.replace(/[^\d.,]/g, "").replace(",", ".")) || null;
-  const descricao = text.replace(/[+-]?\d+[,.]?\d*/g, "").trim();
-
-  if (["entrada", "saida"].includes(acao) && valor) {
-    await registrarTransacao({
-      tipo: acao,
-      valor,
-      descricao,
-      tipo_fixo: "variavel",
-      chatId,
-      userId: user_id,
-      familyId: family_id,
-      perguntarEssencial: perguntar_essencial,
-    });
-  } else {
-    await sendMessage(chatId, "💬 Comandos úteis:\n`+2500 salário`\n`-300 mercado`\n`/resumo`\n`/frequencia`");
+  // Rotas IA
+  switch (interpret.acao) {
+    case "entrada":
+    case "saida":
+      if (interpret.valor)
+        await registrarTransacao({
+          tipo: interpret.acao,
+          valor: interpret.valor,
+          descricao: interpret.descricao,
+          chatId,
+          userId: user_id,
+          familyId: family_id,
+          perguntarEssencial: perguntar_essencial,
+        });
+      else await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
+      break;
+    case "saldo":
+      await comandoSaldo(chatId, user_id, family_id);
+      break;
+    case "resumo":
+      await comandoResumo(chatId, user_id);
+      break;
+    case "menu":
+    case "/ajuda":
+      await sendMessage(chatId, "💡 Comandos disponíveis:\n/saldo\n/resumo\n/projecao\n/limpar");
+      break;
+    default:
+      await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
   }
 
   res.sendStatus(200);
-});
-
-/* ============================================================
-⏰ CRONS AUTOMÁTICOS
-============================================================ */
-cron.schedule("0 9 * * 1", async () => {
-  const { data } = await supabase.from("telegram_users").select("chat_id, user_id, frequencia_relatorio");
-  for (const u of data || []) {
-    if (["semanal", "todos"].includes(u.frequencia_relatorio))
-      await enviarRelatorioTelegram(u.user_id, u.chat_id);
-  }
-});
-
-cron.schedule("0 9 1,15 * *", async () => {
-  const { data } = await supabase.from("telegram_users").select("chat_id, user_id, frequencia_relatorio");
-  for (const u of data || []) {
-    if (["quinzenal", "todos"].includes(u.frequencia_relatorio))
-      await enviarRelatorioTelegram(u.user_id, u.chat_id);
-  }
-});
-
-cron.schedule("0 9 1 * *", async () => {
-  const { data } = await supabase.from("telegram_users").select("chat_id, user_id, frequencia_relatorio");
-  for (const u of data || []) {
-    if (["mensal", "todos"].includes(u.frequencia_relatorio))
-      await enviarRelatorioTelegram(u.user_id, u.chat_id);
-  }
 });
 
 /* ============================================================
