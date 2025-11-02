@@ -303,13 +303,15 @@ app.post("/gerar-token-telegram", async (req, res) => {
 app.post("/ativar-teste", async (req, res) => {
   const { user_id } = req.body;
   try {
-    const { data: usuario } = await supabase
+    const { data: usuario, error } = await supabase
       .from("users")
       .select("plano, trial_ativo, trial_expira_em")
       .eq("id", user_id)
       .maybeSingle();
 
-    if (!usuario) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+    if (error || !usuario)
+      return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+
     if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
       return res.json({
         success: false,
@@ -318,24 +320,27 @@ app.post("/ativar-teste", async (req, res) => {
       });
     }
 
-    const { error } = await supabase
+    const expiraEm = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    await supabase
       .from("users")
       .update({
         plano: "pro",
         trial_ativo: true,
-        trial_expira_em: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        trial_expira_em: expiraEm,
       })
       .eq("id", user_id);
 
-    if (error) throw error;
-
-    res.json({ success: true, message: "✅ Teste de 30 dias ativado com sucesso!" });
+    res.json({
+      success: true,
+      message: "✅ Teste de 30 dias ativado com sucesso!",
+      expira_em: expiraEm,
+    });
   } catch (err) {
     console.error("Erro ao ativar teste:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
 /* ============================================================
 🤖 WEBHOOK TELEGRAM (com /start, /menu, /help e leitura de foto)
 ============================================================ */
