@@ -348,20 +348,21 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const text = msg.text?.trim();
   
 /* ============================================================
-// 📸 DETECTA ENVIO DE FOTO (nota fiscal ou recibo) — VERSÃO OCR + IA
-  ============================================================ */
+📸 DETECTA ENVIO DE FOTO (nota fiscal ou recibo)
+============================================================ */
   
-import Tesseract from "tesseract.js";
-
 if (msg.photo && msg.photo.length > 0) {
   try {
-    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    // 🧩 Importa Tesseract dinamicamente (compatível com ESM + Render)
+    const pkgTesseract = await import("tesseract.js");
+    const { createWorker } = pkgTesseract;
 
-    // 📥 Baixa imagem do Telegram
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
     const tgResp = await fetch(
       `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`
     );
     const fileInfo = await tgResp.json();
+
     if (!fileInfo?.ok) {
       await sendMessage(chatId, "⚠️ Erro ao baixar imagem. Tente novamente.");
       return res.sendStatus(200);
@@ -373,11 +374,11 @@ if (msg.photo && msg.photo.length > 0) {
     await sendMessage(chatId, "🧾 Recebido! Estou lendo sua nota fiscal...");
 
     // 🔠 OCR: extrai texto da imagem
-    const ocrResult = await Tesseract.recognize(fileUrl, "por", {
-      logger: (info) => console.log("📄 OCR:", info.status, info.progress),
-    });
+    const worker = await createWorker("por"); // idioma português
+    const { data: ocrResult } = await worker.recognize(fileUrl);
+    await worker.terminate();
 
-    const textoExtraido = ocrResult.data.text;
+    const textoExtraido = ocrResult.text;
     console.log("🧠 Texto OCR extraído:", textoExtraido.slice(0, 300));
 
     // 🧠 Envia texto para IA interpretar
