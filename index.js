@@ -343,6 +343,56 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
   // 🎛 CALLBACKS (categorias, essencial e menu)
   if (body.callback_query) {
+    if (body.callback_query) {
+  const cb = body.callback_query;
+  const chatId = cb.message.chat.id;
+  const user = await buscarUsuario(chatId);
+  const userId = user?.user_id;
+
+  // 🧾 Confirmação de despesa via foto
+  if (cb.data.startsWith("conf_foto_")) {
+    const [_, valor, ...descParts] = cb.data.split("_");
+    const descricao = descParts.join(" ");
+    const user = await buscarUsuario(chatId);
+
+    if (!user) {
+      await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+      return;
+    }
+
+    await registrarTransacao({
+      tipo: "saida",
+      valor,
+      descricao,
+      chatId,
+      userId: user.user_id,
+      familyId: user.family_id,
+      perguntarEssencial: user.perguntar_essencial,
+    });
+
+    await sendMessage(chatId, "💸 Saída registrada com sucesso!");
+    return;
+  }
+
+  if (cb.data === "cancelar_foto") {
+    await sendMessage(chatId, "❌ Registro cancelado.");
+    return;
+  }
+
+  if (cb.data.startsWith("cat_")) {
+    const [_, transacaoId, categoria] = cb.data.split("_");
+    await supabase.from("transacoes").update({ categoria }).eq("id", transacaoId);
+    await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
+  }
+
+  if (cb.data.startsWith("ess_")) {
+    const [_, transacaoId, valor] = cb.data.split("_");
+    await definirEssencialidade(transacaoId, valor, chatId, userId);
+  }
+
+  await sendCallbackAnswer(cb.id);
+  return res.sendStatus(200);
+}
     const cb = body.callback_query;
     const chatId = cb.message.chat.id;
     const data = cb.data;
@@ -508,6 +558,71 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   }
 
   res.sendStatus(200);
+
+  // 📸 DETECTA ENVIO DE FOTO (nota fiscal)
+if (msg.photo && msg.photo.length > 0) {
+  const fileId = msg.photo[msg.photo.length - 1].file_id; // pega o melhor tamanho da foto
+  const fileInfo = await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`
+  ).then((r) => r.json());
+
+  const filePath = fileInfo.result.file_path;
+  const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+
+  // 🔍 Extrai texto da imagem com IA (OCR via OpenAI)
+  const extractPrompt = `
+Você é um assistente financeiro. 
+Extraia do texto abaixo os seguintes dados:
+- Valor total da compra (ex: 152.35)
+- Nome do estabelecimento
+- Data (se existir)
+Responda APENAS em JSON:
+{
+  "valor": número,
+  "descricao": "texto breve com o nome do local",
+  "data": "YYYY-MM-DD" ou null
+}
+`;
+  const result = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: extractPrompt },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Texto da imagem:" },
+          { type: "image_url", image_url: fileUrl },
+        ],
+      },
+    ],
+  });
+
+  const raw = result.choices[0].message.content.trim();
+  const match = raw.match(/\{[\s\S]*\}/);
+  const dataExtraida = match ? JSON.parse(match[0]) : null;
+
+  if (!dataExtraida?.valor) {
+    await sendMessage(chatId, "⚠️ Não consegui identificar um valor na nota. Tente novamente com uma imagem mais nítida.");
+    return res.sendStatus(200);
+  }
+
+  // 💬 Confirmação antes de registrar
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${dataExtraida.descricao}` },
+        { text: "❌ Cancelar", callback_data: "cancelar_foto" },
+      ],
+    ],
+  };
+  await sendMessage(
+    chatId,
+    `Detectei um valor de *R$${dataExtraida.valor}* em *${dataExtraida.descricao}*.\n\nDeseja registrar essa compra como saída?`,
+    replyMarkup
+  );
+
+  return res.sendStatus(200);
+}
 });
 
 /* ============================================================
