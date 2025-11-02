@@ -415,21 +415,22 @@ ${textoExtraido}
       return res.sendStatus(200);
     }
 
-    // 💬 Confirmação antes de registrar
-    const replyMarkup = {
-      inline_keyboard: [
-        [
-          { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${dataExtraida.descricao}` },
-          { text: "❌ Cancelar", callback_data: "cancelar_foto" },
-        ],
-      ],
-    };
+   // 💬 Confirmação antes de registrar (com opção de correção)
+const replyMarkup = {
+  inline_keyboard: [
+    [
+      { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${dataExtraida.descricao}` },
+      { text: "✏️ Corrigir valor", callback_data: `corrigir_${dataExtraida.descricao}` },
+      { text: "❌ Cancelar", callback_data: "cancelar_foto" },
+    ],
+  ],
+};
 
-    await sendMessage(
-      chatId,
-      `Detectei *R$${dataExtraida.valor}* em *${dataExtraida.descricao}*.\nDeseja registrar essa compra como saída?`,
-      replyMarkup
-    );
+await sendMessage(
+  chatId,
+  `Detectei *R$${dataExtraida.valor}* em *${dataExtraida.descricao}*.\nDeseja registrar essa compra como saída?`,
+  replyMarkup
+);
 
     return res.sendStatus(200);
   } catch (err) {
@@ -484,7 +485,25 @@ ${textoExtraido}
     await sendCallbackAnswer(cb.id);
     return res.sendStatus(200);
   }
+if (cb.data.startsWith("corrigir_")) {
+  const descricao = cb.data.replace("corrigir_", "");
+  await sendMessage(
+    chatId,
+    `✏️ Digite o valor correto para *${descricao}* (ex: 152.35):`
+  );
 
+  // Guardar contexto no Supabase para saber que o usuário está corrigindo
+  await supabase
+    .from("telegram_temp")
+    .upsert({
+      chat_id: chatId.toString(),
+      contexto: "corrigir_valor",
+      descricao,
+      atualizado_em: new Date(),
+    });
+
+  return res.sendStatus(200);
+}
   /* ============================================================
   💬 COMANDOS DE TEXTO (/start, /menu, /help)
   ============================================================ */
@@ -528,7 +547,35 @@ ${textoExtraido}
     );
     return res.sendStatus(200);
   }
+  
+// 🧩 Verifica se o usuário está corrigindo um valor
+const { data: temp } = await supabase
+  .from("telegram_temp")
+  .select("*")
+  .eq("chat_id", chatId)
+  .maybeSingle();
 
+if (temp && temp.contexto === "corrigir_valor") {
+  const novoValor = parseFloat(text.replace(",", "."));
+  if (isNaN(novoValor)) {
+    await sendMessage(chatId, "⚠️ Valor inválido. Tente novamente (ex: 153.29).");
+    return res.sendStatus(200);
+  }
+
+  await registrarTransacao({
+    tipo: "saida",
+    valor: novoValor,
+    descricao: temp.descricao,
+    chatId,
+    userId: user.user_id,
+    familyId: user.family_id,
+    perguntarEssencial: user.perguntar_essencial,
+  });
+
+  await supabase.from("telegram_temp").delete().eq("chat_id", chatId);
+  await sendMessage(chatId, "💸 Saída registrada com o valor corrigido!");
+  return res.sendStatus(200);
+}
   /* ============================================================
   🧩 REGISTRO DE TEXTO (IA e transações)
   ============================================================ */
