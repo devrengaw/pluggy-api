@@ -485,22 +485,6 @@ await sendMessage(
     await sendCallbackAnswer(cb.id);
     return res.sendStatus(200);
   }
-if (cb.data.startsWith("corrigir_")) {
-  const descricao = cb.data.replace("corrigir_", "");
-  await sendMessage(
-    chatId,
-    `✏️ Digite o valor correto para *${descricao}* (ex: 152.35):`
-  );
-
-  // Guardar contexto no Supabase para saber que o usuário está corrigindo
-  await supabase
-    .from("telegram_temp")
-    .upsert({
-      chat_id: chatId.toString(),
-      contexto: "corrigir_valor",
-      descricao,
-      atualizado_em: new Date(),
-    });
 
   return res.sendStatus(200);
 }
