@@ -268,6 +268,32 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     }
   }
 
+      // 🆘 Ajuda /help
+    if (text?.toLowerCase() === "/help") {
+      await sendMessage(
+        chatId,
+        "*📖 Guia FinanceFlow — Ajuda Rápida*\n\n" +
+          "Veja como aproveitar o máximo do bot e do app:\n\n" +
+          "💰 *Registrar transações*\n" +
+          "Envie mensagens simples, como:\n" +
+          "`+2500 salário` → registra entrada\n" +
+          "`-150 mercado` → registra saída\n\n" +
+          "🧠 *IA Financeira*\n" +
+          "A IA identifica automaticamente se é fixo, variável ou essencial, " +
+          "e aprende com seus hábitos para classificar melhor as próximas transações.\n\n" +
+          "👨‍👩‍👧 *Hub Familiar*\n" +
+          "Convide familiares no app (aba *Hub Familiar*) para compartilhar o mesmo painel e ver as finanças juntos.\n\n" +
+          "📲 *Telegram + App*\n" +
+          "Tudo que você registra aqui aparece no painel principal do app.\n" +
+          "Se quiser reconectar o Telegram, vá em *Configurações > Integração Telegram* e gere um novo token.\n\n" +
+          "🔗 *Comandos úteis:*\n" +
+          "/menu — mostra opções principais\n" +
+          "/start — mensagem de boas-vindas\n" +
+          "/help — exibe este guia"
+      );
+      return res.sendStatus(200);
+    }
+
   res.sendStatus(200);
 });
 
