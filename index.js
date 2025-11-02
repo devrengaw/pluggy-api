@@ -585,6 +585,66 @@ if (body.callback_query) {
     return res.sendStatus(200);
   }
   
+  /* ============================================================
+🔑 VINCULAÇÃO VIA TOKEN TELEGRAM
+============================================================ */
+if (text.toLowerCase().startsWith("/vincular")) {
+  const parts = text.split(" ");
+  const token = parts[1]?.trim();
+
+  if (!token || !token.startsWith("TLG-")) {
+    await sendMessage(chatId, "❌ Formato inválido. Envie assim:\n`/vincular TLG-XXXXXX`");
+    return res.sendStatus(200);
+  }
+
+  // 🔍 Busca token ativo
+  const { data: tokenData, error: tokenError } = await supabase
+    .from("telegram_tokens")
+    .select("id, user_id, family_id, ativo")
+    .eq("token", token)
+    .maybeSingle();
+
+  if (tokenError || !tokenData || !tokenData.ativo) {
+    await sendMessage(chatId, "⚠️ Token inválido ou expirado. Gere um novo no app FinanceFlow.");
+    return res.sendStatus(200);
+  }
+
+  // ✅ Vincula conta
+  const { error: upsertError } = await supabase.from("telegram_users").upsert({
+    chat_id: chatId.toString(),
+    user_id: tokenData.user_id,
+    family_id: tokenData.family_id,
+    perguntar_essencial: true,
+    conectado: true,
+    atualizado_em: new Date(),
+  });
+
+  if (upsertError) {
+    console.error("❌ Erro ao vincular Telegram:", upsertError);
+    await sendMessage(chatId, "⚠️ Erro ao vincular conta. Tente novamente.");
+    return res.sendStatus(200);
+  }
+
+  // 🔒 Desativa token após uso
+  await supabase
+    .from("telegram_tokens")
+    .update({ ativo: false, usado_em: new Date() })
+    .eq("id", tokenData.id);
+
+  // 🧠 Mensagem final
+  await sendMessage(
+    chatId,
+    "✅ *Conta vinculada com sucesso!*\n\n" +
+      "Agora você pode registrar suas transações diretamente por aqui:\n" +
+      "Exemplos:\n" +
+      "`+2000 salário`\n" +
+      "`-150 mercado`\n\n" +
+      "Use /menu para ver outras opções."
+  );
+
+  return res.sendStatus(200);
+}
+
 // 🧩 Verifica se o usuário está corrigindo um valor
 const { data: temp } = await supabase
   .from("telegram_temp")
@@ -666,57 +726,6 @@ supabaseRealtime
   })
   .subscribe();
 
-/* ============================================================
-🔌 DESCONECTAR TELEGRAM
-============================================================ */
-app.post("/desconectar-telegram", async (req, res) => {
-  const { user_id } = req.body;
-
-  // 🚨 Verificação inicial
-  if (!user_id)
-    return res.status(400).json({
-      success: false,
-      message: "Usuário não informado.",
-    });
-
-  try {
-    // 1️⃣ Atualiza o status do usuário no Telegram
-    const { error: userError } = await supabase
-      .from("telegram_users")
-      .update({
-        conectado: false,
-        atualizado_em: new Date(),
-      })
-      .eq("user_id", user_id);
-
-    if (userError) throw userError;
-
-    // 2️⃣ Desativa tokens vinculados
-    const { error: tokenError } = await supabase
-      .from("telegram_tokens")
-      .update({
-        ativo: false,
-        usado_em: new Date(),
-      })
-      .eq("user_id", user_id);
-
-    if (tokenError) throw tokenError;
-
-    // 3️⃣ Retorno de sucesso
-    console.log(`🔌 Usuário ${user_id} desconectado do Telegram com sucesso.`);
-    return res.json({
-      success: true,
-      message: "🔌 Telegram desconectado com sucesso.",
-    });
-  } catch (err) {
-    console.error("❌ Erro ao desconectar Telegram:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Erro ao desconectar Telegram.",
-      error: err.message,
-    });
-  }
-});
 
 /* ============================================================
 🔌 DESCONECTAR TELEGRAM
