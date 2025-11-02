@@ -579,6 +579,7 @@ if (temp && temp.contexto === "corrigir_valor") {
   /* ============================================================
   🧩 REGISTRO DE TEXTO (IA e transações)
   ============================================================ */
+  
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
