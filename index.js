@@ -521,7 +521,35 @@ if (body.callback_query) {
       await sendCallbackAnswer(cb.id);
       return res.sendStatus(200);
     }
+    
+// 📋 CALLBACKS DO MENU DE AJUDA
+if (["ajuda_entrada", "ajuda_saida", "ajuda_resumo", "ajuda_ia", "ajuda_vinculo"].includes(data)) {
+  switch (data) {
+    case "ajuda_entrada":
+      await sendMessage(chatId, "💰 Envie algo como `+2000 salário` para registrar uma *entrada*.");
+      break;
+    case "ajuda_saida":
+      await sendMessage(chatId, "💸 Envie algo como `-150 mercado` para registrar uma *saída*.");
+      break;
+    case "ajuda_resumo":
+      await sendMessage(chatId, "📊 Veja seu resumo completo no app FinanceFlow, na aba *Dashboard*.");
+      break;
+    case "ajuda_ia":
+      await sendMessage(chatId, "🧠 A IA classifica automaticamente suas transações e aprende seus hábitos financeiros.");
+      break;
+    case "ajuda_vinculo":
+      await sendMessage(
+        chatId,
+        "🔗 Para vincular sua conta:\n" +
+          "1️⃣ Gere um novo token no app (Configurações → Integrações → Telegram)\n" +
+          "2️⃣ Envie aqui `/vincular TLG-XXXXXX`"
+      );
+      break;
+  }
 
+  await sendCallbackAnswer(cb.id);
+  return res.sendStatus(200);
+}
     // 🔚 Fallback: marca callback como respondido
     await sendCallbackAnswer(cb.id);
     return res.sendStatus(200);
