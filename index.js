@@ -538,15 +538,22 @@ if (body.callback_query) {
   💬 COMANDOS DE TEXTO (/start, /menu, /help)
   ============================================================ */
   if (text?.toLowerCase() === "/start") {
-    await sendMessage(
-      chatId,
-      "👋 *Bem-vindo(a) ao FinanceFlow!*\n\n" +
-        "💡 Registre ganhos e gastos direto por aqui e veja tudo no app.\n\n" +
-        "Exemplos:\n`+2000 salário`\n`-150 mercado`\n\n" +
-        "Use /menu para ver as funções e /help para ajuda."
-    );
-    return res.sendStatus(200);
-  }
+  await sendMessage(
+    chatId,
+    "👋 *Bem-vindo(a) ao FinanceFlow!*\n\n" +
+      "💡 Aqui você pode registrar seus *ganhos* e *gastos* diretamente pelo Telegram, e tudo será sincronizado automaticamente com o app.\n\n" +
+      "🪄 *Antes de começar*, é preciso vincular sua conta:\n" +
+      "1️⃣ No app FinanceFlow, vá em *Configurações → Integrações → Telegram*.\n" +
+      "2️⃣ Toque em *Gerar novo token*.\n" +
+      "3️⃣ Copie o código gerado (ex: `TLG-AB12CD`).\n" +
+      "4️⃣ Volte aqui e envie:\n`/vincular TLG-AB12CD`\n\n" +
+      "✨ Depois disso, você já pode enviar mensagens como:\n" +
+      "`+2500 salário`\n" +
+      "`-150 mercado`\n\n" +
+      "Use /menu para ver as funções disponíveis ou /help para ajuda detalhada."
+  );
+  return res.sendStatus(200);
+}
 
   if (text?.toLowerCase() === "/menu") {
     const replyMarkup = {
