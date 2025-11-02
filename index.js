@@ -416,11 +416,13 @@ ${textoExtraido}
     }
 
    // 💬 Confirmação antes de registrar (com opção de correção)
+const descricaoSafe = encodeURIComponent(dataExtraida.descricao || "Compra");
+
 const replyMarkup = {
   inline_keyboard: [
     [
-      { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${dataExtraida.descricao}` },
-      { text: "✏️ Corrigir valor", callback_data: `corrigir_${dataExtraida.descricao}` },
+      { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${descricaoSafe}` },
+      { text: "✏️ Corrigir valor", callback_data: `corrigir_${descricaoSafe}` },
       { text: "❌ Cancelar", callback_data: "cancelar_foto" },
     ],
   ],
@@ -452,76 +454,86 @@ if (body.callback_query) {
 
   console.log("🧩 Callback recebido:", data);
 
-  // ✅ CONFIRMAR FOTO
-  if (data.startsWith("conf_foto_")) {
-    const [_, valor, ...descParts] = data.split("_");
-    const descricao = descParts.join(" ");
-    if (!user) {
-      await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+  try {
+    // ✅ CONFIRMAR FOTO
+    if (data.startsWith("conf_foto_")) {
+      const [_, valor, ...descParts] = data.split("_");
+      const descricao = decodeURIComponent(descParts.join("_"));
+      if (!user) {
+        await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+        await sendCallbackAnswer(cb.id);
+        return res.sendStatus(200);
+      }
+
+      await registrarTransacao({
+        tipo: "saida",
+        valor,
+        descricao,
+        chatId,
+        userId: user.user_id,
+        familyId: user.family_id,
+        perguntarEssencial: user.perguntar_essencial,
+      });
+
+      await sendMessage(chatId, "💸 Saída registrada com sucesso!");
+      await sendCallbackAnswer(cb.id);
       return res.sendStatus(200);
     }
-    await registrarTransacao({
-      tipo: "saida",
-      valor,
-      descricao,
-      chatId,
-      userId: user.user_id,
-      familyId: user.family_id,
-      perguntarEssencial: user.perguntar_essencial,
-    });
-    await sendMessage(chatId, "💸 Saída registrada com sucesso!");
-    await sendCallbackAnswer(cb.id);
-    return res.sendStatus(200);
-  }
 
-  // ✏️ CORRIGIR VALOR
-  if (data.startsWith("corrigir_")) {
-    const descricao = data.replace("corrigir_", "");
-    await sendMessage(
-      chatId,
-      `✏️ Digite o valor correto para *${descricao}* (ex: 152.35):`
-    );
+    // ✏️ CORRIGIR VALOR
+    if (data.startsWith("corrigir_")) {
+      const descricao = decodeURIComponent(data.replace("corrigir_", ""));
+      await sendMessage(
+        chatId,
+        `✏️ Digite o valor correto para *${descricao}* (ex: 152.35):`
+      );
 
-    await supabase
-      .from("telegram_temp")
-      .upsert({
+      await supabase.from("telegram_temp").upsert({
         chat_id: chatId.toString(),
         contexto: "corrigir_valor",
         descricao,
         atualizado_em: new Date(),
       });
 
+      await sendCallbackAnswer(cb.id);
+      return res.sendStatus(200);
+    }
+
+    // ❌ CANCELAR
+    if (data === "cancelar_foto") {
+      await sendMessage(chatId, "❌ Registro cancelado.");
+      await sendCallbackAnswer(cb.id);
+      return res.sendStatus(200);
+    }
+
+    // 🗂 CATEGORIA
+    if (data.startsWith("cat_")) {
+      const [_, transacaoId, categoria] = data.split("_");
+      await definirCategoria(transacaoId, categoria, chatId);
+      await sendCallbackAnswer(cb.id);
+      return res.sendStatus(200);
+    }
+
+    // ⚙️ ESSENCIALIDADE
+    if (data.startsWith("ess_")) {
+      const [_, transacaoId, valor] = data.split("_");
+      await definirEssencialidade(transacaoId, valor, chatId, userId);
+      await sendCallbackAnswer(cb.id);
+      return res.sendStatus(200);
+    }
+
+    // 🔚 Fallback: marca callback como respondido
     await sendCallbackAnswer(cb.id);
     return res.sendStatus(200);
-  }
-
-  // ❌ CANCELAR
-  if (data === "cancelar_foto") {
-    await sendMessage(chatId, "❌ Registro cancelado.");
-    await sendCallbackAnswer(cb.id);
+  } catch (err) {
+    console.error("❌ Erro ao processar callback:", err);
+    try {
+      await sendCallbackAnswer(cb.id, "Erro ao processar ação");
+    } catch {}
     return res.sendStatus(200);
   }
-
-  // 🗂 CATEGORIA
-  if (data.startsWith("cat_")) {
-    const [_, transacaoId, categoria] = data.split("_");
-    await definirCategoria(transacaoId, categoria, chatId);
-    await sendCallbackAnswer(cb.id);
-    return res.sendStatus(200);
-  }
-
-  // ⚙️ ESSENCIALIDADE
-  if (data.startsWith("ess_")) {
-    const [_, transacaoId, valor] = data.split("_");
-    await definirEssencialidade(transacaoId, valor, chatId, userId);
-    await sendCallbackAnswer(cb.id);
-    return res.sendStatus(200);
-  }
-
-  // 🔚 Finaliza callback
-  await sendCallbackAnswer(cb.id);
-  return res.sendStatus(200);
 }
+  
   /* ============================================================
   💬 COMANDOS DE TEXTO (/start, /menu, /help)
   ============================================================ */
