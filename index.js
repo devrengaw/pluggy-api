@@ -346,77 +346,105 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
 
-  /* ============================================================
-  📸 DETECTA ENVIO DE FOTO (nota fiscal ou recibo)
-  ============================================================ */
-  if (msg.photo && msg.photo.length > 0) {
+// 📸 DETECTA ENVIO DE FOTO (nota fiscal ou recibo)
+if (msg.photo && msg.photo.length > 0) {
+  try {
+    // 1) Pega a melhor resolução
     const fileId = msg.photo[msg.photo.length - 1].file_id;
-    const fileInfo = await fetch(
+
+    // 2) Resolve o caminho do arquivo no Telegram
+    const tgResp = await fetch(
       `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`
-    ).then((r) => r.json());
+    );
+    const fileInfo = await tgResp.json();
+
+    if (!fileInfo?.ok || !fileInfo?.result?.file_path) {
+      console.error("getFile falhou:", fileInfo);
+      await sendMessage(chatId, "⚠️ Não consegui baixar a imagem. Tente reenviar.");
+      return res.sendStatus(200);
+    }
 
     const filePath = fileInfo.result.file_path;
     const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
 
     await sendMessage(chatId, "🧾 Recebido! Estou lendo sua nota fiscal...");
 
-    const extractPrompt = `
-Você é um assistente financeiro.
-Extraia do texto da nota fiscal:
-- O valor total (ex: 152.35)
-- O nome do estabelecimento
-Responda apenas em JSON:
-{
-  "valor": número,
-  "descricao": "nome do local"
-}
-`;
+    // 3) Prompt de extração (curto e objetivo)
+    const extractPrompt =
+      "Extraia da imagem da nota fiscal o valor total (número, ponto decimal) e o nome do estabelecimento. " +
+      "Responda APENAS em JSON como: {\"valor\": 152.35, \"descricao\": \"Supermercado XPTO\"}";
 
-    try {
-      const result = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: extractPrompt },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Analise a imagem:" },
-              { type: "image_url", image_url: fileUrl },
-            ],
-          },
-        ],
-      });
-
-      const raw = result.choices[0].message.content.trim();
-      const match = raw.match(/\{[\s\S]*\}/);
-      const dataExtraida = match ? JSON.parse(match[0]) : null;
-
-      if (!dataExtraida?.valor) {
-        await sendMessage(chatId, "⚠️ Não consegui identificar o valor total. Envie uma imagem mais nítida.");
-        return res.sendStatus(200);
-      }
-
-      const replyMarkup = {
-        inline_keyboard: [
-          [
-            { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${dataExtraida.descricao}` },
-            { text: "❌ Cancelar", callback_data: "cancelar_foto" },
+    // 4) Chamada de visão com Responses API (mais estável p/ imagem)
+    const vision = await openai.responses.create({
+      model: "gpt-4o-mini",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: extractPrompt },
+            { type: "input_image", image_url: { url: fileUrl } },
           ],
-        ],
-      };
+        },
+      ],
+      temperature: 0.0,
+    });
 
+    // 5) Extrai texto consolidado
+    const outText =
+      vision.output_text ??
+      (vision?.output?.[0]?.content?.[0]?.text ?? "").toString();
+
+    // 6) Parse do JSON
+    let dataExtraida = null;
+    try {
+      const match = outText.match(/\{[\s\S]*\}/);
+      dataExtraida = match ? JSON.parse(match[0]) : JSON.parse(outText);
+    } catch (e) {
+      console.error("Parse JSON visão falhou. Texto:", outText);
+    }
+
+    if (!dataExtraida?.valor || isNaN(Number(dataExtraida.valor))) {
       await sendMessage(
         chatId,
-        `Detectei *R$${dataExtraida.valor}* em *${dataExtraida.descricao}*.\nDeseja registrar essa compra como saída?`,
-        replyMarkup
+        "⚠️ Não consegui identificar o valor total na imagem. Tente uma foto mais nítida (mostrando o total)."
       );
       return res.sendStatus(200);
-    } catch (err) {
-      console.error("Erro IA:", err);
-      await sendMessage(chatId, "❌ Ocorreu um erro ao analisar a imagem. Tente novamente.");
-      return res.sendStatus(200);
     }
+
+    const valorNum = Number(dataExtraida.valor);
+    const desc = (dataExtraida.descricao || "Compra").toString().slice(0, 60);
+
+    // 7) Confirmação antes de registrar
+    const replyMarkup = {
+      inline_keyboard: [
+        [
+          { text: "✅ Confirmar", callback_data: `conf_foto_${valorNum}_${desc}` },
+          { text: "❌ Cancelar", callback_data: "cancelar_foto" },
+        ],
+      ],
+    };
+
+    await sendMessage(
+      chatId,
+      `Detectei *R$${valorNum.toFixed(2)}* em *${desc}*.\nDeseja registrar essa compra como saída?`,
+      replyMarkup
+    );
+
+    return res.sendStatus(200);
+  } catch (err) {
+    // Log detalhado para debug
+    console.error("Erro IA (visão) ao analisar imagem:", {
+      message: err?.message,
+      data: err?.response?.data,
+      stack: err?.stack,
+    });
+    await sendMessage(
+      chatId,
+      "❌ Ocorreu um erro ao analisar a imagem. Tente novamente com uma foto mais nítida."
+    );
+    return res.sendStatus(200);
   }
+}
 
   /* ============================================================
   🎛 CALLBACKS (categorias, essencial e confirmações)
