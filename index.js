@@ -485,6 +485,11 @@ await sendMessage(
     await sendCallbackAnswer(cb.id);
     return res.sendStatus(200);
   }
+if (cb.data.startsWith("corrigir_")) {
+  const descricao = cb.data.replace("corrigir_", "");
+  await sendMessage(
+    chatId,
+    `✏️ Digite o valor correto para *${descricao}* (ex: 152.35):`
   );
 
   // Guardar contexto no Supabase para saber que o usuário está corrigindo
@@ -574,7 +579,6 @@ if (temp && temp.contexto === "corrigir_valor") {
   /* ============================================================
   🧩 REGISTRO DE TEXTO (IA e transações)
   ============================================================ */
-  
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
