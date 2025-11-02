@@ -1,4 +1,6 @@
-// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar, Teste de 30 dias (Plano PRO), Token Telegram e Realtime Supabase ↔ Telegram ↔ Horizons
+// index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar,
+// Teste de 30 dias (Plano PRO), Token Telegram e Realtime Supabase ↔ Telegram ↔ Horizons
+
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -6,6 +8,7 @@ import bodyParser from "body-parser";
 import supabase from "./supabase.js";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
+import { randomUUID } from "crypto";
 
 dotenv.config();
 
@@ -50,7 +53,6 @@ async function buscarUsuario(chatId) {
     .maybeSingle();
   return data || null;
 }
-
 
 /* ============================================================
 🧠 INTERPRETAÇÃO NATURAL (IA)
@@ -142,7 +144,6 @@ function detectarTipoFixo(descricao) {
 ============================================================ */
 async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
   const tipo_fixo = detectarTipoFixo(descricao);
-
   const { data, error } = await supabase
     .from("transacoes")
     .insert({
@@ -222,78 +223,12 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
 }
 
 /* ============================================================
-🔑 GERAR TOKEN TELEGRAM
-============================================================ */
-app.post("/gerar-token-telegram", async (req, res) => {
-  const { user_id } = req.body;
-  try {
-    const { data: user } = await supabase
-      .from("users")
-      .select("id, family_id")
-      .eq("id", user_id)
-      .maybeSingle();
-
-    if (!user) {
-      return res.status(404).json({ success: false, message: "Usuário não encontrado" });
-    }
-
-    const token = `TLG-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-    const { error } = await supabase.from("telegram_tokens").insert({
-      token,
-      user_id: user.id,
-      family_id: user.family_id,
-      ativo: true,
-      valid_until: new Date(Date.now() + 15 * 60 * 1000),
-    });
-
-    if (error) throw error;
-    res.json({ success: true, message: "✅ Token gerado com sucesso!", token });
-  } catch (err) {
-    console.error("Erro ao gerar token Telegram:", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-/* ============================================================
-🆓 TESTE DE 30 DIAS
-============================================================ */
-app.post("/ativar-teste", async (req, res) => {
-  const { user_id } = req.body;
-  try {
-    const { data: usuario } = await supabase
-      .from("users")
-      .select("plano, trial_ativo, trial_expira_em")
-      .eq("id", user_id)
-      .maybeSingle();
-
-    if (!usuario) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
-    if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
-      return res.json({ success: false, message: "Você já possui um teste ativo.", expira_em: usuario.trial_expira_em });
-    }
-
-    const { error } = await supabase.from("users").update({
-      plano: "pro",
-      trial_ativo: true,
-      trial_expira_em: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-    }).eq("id", user_id);
-
-    if (error) throw error;
-
-    res.json({ success: true, message: "✅ Teste de 30 dias ativado com sucesso!" });
-  } catch (err) {
-    console.error("Erro ao ativar teste:", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-/* ============================================================
-🤖 WEBHOOK TELEGRAM (CORRIGIDO - sem duplicação de mensagem)
+🤖 WEBHOOK TELEGRAM — corrigido (sem “Nova transação”)
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
 
-  // 🎛 CALLBACKS (botões de categoria / essencial)
+  // 🎛 CALLBACKS
   if (body.callback_query) {
     const cb = body.callback_query;
     const chatId = cb.message.chat.id;
@@ -315,23 +250,21 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // 💬 MENSAGENS NORMAIS
+  // 💬 MENSAGENS
   const msg = body.message;
   if (!msg) return res.sendStatus(200);
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  // 🔑 VINCULAR CONTA AO TELEGRAM
+  // 🔑 VINCULAR
   if (text.toLowerCase().startsWith("/vincular")) {
     const parts = text.split(" ");
     const token = parts[1]?.trim();
-
     if (!token || !token.startsWith("TLG-")) {
       await sendMessage(chatId, "❌ Formato inválido. Envie assim:\n`/vincular TLG-XXXXXX`");
       return res.sendStatus(200);
     }
-
     const { data: tokenData } = await supabase
       .from("telegram_tokens")
       .select("id, user_id, family_id, ativo")
@@ -351,17 +284,11 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       conectado: true,
       atualizado_em: new Date(),
     });
-
-    await supabase
-      .from("telegram_tokens")
-      .update({ ativo: false })
-      .eq("id", tokenData.id);
-
+    await supabase.from("telegram_tokens").update({ ativo: false }).eq("id", tokenData.id);
     await sendMessage(chatId, "✅ Conta vinculada com sucesso! Agora você pode registrar transações por aqui.");
     return res.sendStatus(200);
   }
 
-  // 🔍 VERIFICAR USUÁRIO
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
@@ -375,7 +302,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     case "entrada":
     case "saida":
       if (interpret.valor) {
-        // ⚙️ Apenas registra (sem mensagem duplicada)
         await registrarTransacao({
           tipo: interpret.acao,
           valor: interpret.valor,
@@ -389,7 +315,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
       }
       break;
-
     default:
       await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
   }
@@ -398,51 +323,17 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 });
 
 /* ============================================================
-🔐 GERAR TOKEN TELEGRAM — versão estável
+🔁 SUPABASE REALTIME ↔ TELEGRAM ↔ FRONT (sem duplicação)
 ============================================================ */
-import { randomUUID } from "crypto";
+const supabaseRealtime = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
 
-app.post("/gerar-token-telegram", async (req, res) => {
-  try {
-    const { user_id, family_id } = req.body;
-    if (!user_id)
-      return res.status(400).json({ success: false, message: "Usuário não informado" });
-
-    // Gera token único com prefixo TLG-
-    const token = "TLG-" + randomUUID().split("-")[0].toUpperCase();
-
-    // Desativa tokens anteriores do mesmo usuário
-    await supabase
-      .from("telegram_tokens")
-      .update({ ativo: false })
-      .eq("user_id", user_id);
-
-    // Cria o novo token ativo
-    const { error } = await supabase.from("telegram_tokens").insert({
-      token,
-      user_id,
-      family_id: family_id || null,
-      ativo: true,
-      criado_em: new Date(),
-    });
-
-    if (error) throw error;
-
-    // Retorna o token gerado
-    return res.json({
-      success: true,
-      token,
-      message: "Novo token Telegram gerado com sucesso.",
-    });
-  } catch (err) {
-    console.error("❌ Erro ao gerar token Telegram:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Erro ao gerar token.",
-      error: err.message,
-    });
-  }
-});
+supabaseRealtime
+  .channel("transacoes_updates")
+  .on("postgres_changes", { event: "*", schema: "public", table: "transacoes" }, async (payload) => {
+    console.log("📡 Mudança detectada em transações:", payload.eventType, payload.new);
+    // Mantém o realtime ativo para sincronização, mas não envia mensagens ao Telegram
+  })
+  .subscribe();
 
 /* ============================================================
 🌐 SERVER
