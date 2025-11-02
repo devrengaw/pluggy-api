@@ -352,19 +352,26 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 });
 
 /* ============================================================
-🔐 GERAR TOKEN TELEGRAM
+🔐 GERAR TOKEN TELEGRAM — versão estável
 ============================================================ */
 import { randomUUID } from "crypto";
 
 app.post("/gerar-token-telegram", async (req, res) => {
   try {
     const { user_id, family_id } = req.body;
-    if (!user_id) return res.status(400).json({ success: false, message: "Usuário não informado" });
+    if (!user_id)
+      return res.status(400).json({ success: false, message: "Usuário não informado" });
 
+    // Gera token único com prefixo TLG-
     const token = "TLG-" + randomUUID().split("-")[0].toUpperCase();
 
-    await supabase.from("telegram_tokens").update({ ativo: false }).eq("user_id", user_id);
+    // Desativa tokens anteriores do mesmo usuário
+    await supabase
+      .from("telegram_tokens")
+      .update({ ativo: false })
+      .eq("user_id", user_id);
 
+    // Cria o novo token ativo
     const { error } = await supabase.from("telegram_tokens").insert({
       token,
       user_id,
@@ -375,10 +382,19 @@ app.post("/gerar-token-telegram", async (req, res) => {
 
     if (error) throw error;
 
-    return res.json({ success: true, token, message: "Novo token Telegram gerado com sucesso." });
+    // Retorna o token gerado
+    return res.json({
+      success: true,
+      token,
+      message: "Novo token Telegram gerado com sucesso.",
+    });
   } catch (err) {
-    console.error("Erro ao gerar token Telegram:", err);
-    return res.status(500).json({ success: false, message: "Erro ao gerar token.", error: err.message });
+    console.error("❌ Erro ao gerar token Telegram:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao gerar token.",
+      error: err.message,
+    });
   }
 });
 
