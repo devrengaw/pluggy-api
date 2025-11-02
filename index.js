@@ -23,6 +23,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 /* ============================================================
 🔧 UTILITÁRIOS
 ============================================================ */
+
 async function sendMessage(chatId, text, reply_markup = null) {
   try {
     const payload = { chat_id: chatId, text, parse_mode: "Markdown" };
