@@ -286,22 +286,9 @@ app.post("/ativar-teste", async (req, res) => {
   }
 });
 
-/* ============================================================
-🔁 SUPABASE REALTIME ↔ TELEGRAM ↔ FRONT
-============================================================ */
-const supabaseRealtime = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
-supabaseRealtime
-  .channel("transacoes_updates")
-  .on("postgres_changes", { event: "*", schema: "public", table: "transacoes" }, async (payload) => {
-    console.log("📡 Mudança detectada:", payload.eventType, payload.new);
-    if (payload.eventType === "INSERT" && payload.new?.chat_id) {
-      await sendMessage(payload.new.chat_id, `💬 Nova transação: ${payload.new.descricao} — R$${payload.new.valor}`);
-    }
-  })
-  .subscribe();
 
 /* ============================================================
-🤖 WEBHOOK TELEGRAM
+🤖 WEBHOOK TELEGRAM (CORRIGIDO - sem duplicação de mensagem)
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
@@ -328,14 +315,14 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // 💬 MENSAGENS
+  // 💬 MENSAGENS NORMAIS
   const msg = body.message;
   if (!msg) return res.sendStatus(200);
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
-  // 🔑 VINCULAÇÃO VIA TOKEN
+  // 🔑 VINCULAR CONTA AO TELEGRAM
   if (text.toLowerCase().startsWith("/vincular")) {
     const parts = text.split(" ");
     const token = parts[1]?.trim();
@@ -365,16 +352,16 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       atualizado_em: new Date(),
     });
 
-    await supabase.from("telegram_tokens").update({
-      ativo: false,
-      usado_em: new Date(),
-    }).eq("id", tokenData.id);
+    await supabase
+      .from("telegram_tokens")
+      .update({ ativo: false })
+      .eq("id", tokenData.id);
 
     await sendMessage(chatId, "✅ Conta vinculada com sucesso! Agora você pode registrar transações por aqui.");
     return res.sendStatus(200);
   }
 
-  // 🔍 VERIFICA USUÁRIO JÁ VINCULADO
+  // 🔍 VERIFICAR USUÁRIO
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
@@ -387,7 +374,8 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   switch (interpret.acao) {
     case "entrada":
     case "saida":
-      if (interpret.valor)
+      if (interpret.valor) {
+        // ⚙️ Apenas registra (sem mensagem duplicada)
         await registrarTransacao({
           tipo: interpret.acao,
           valor: interpret.valor,
@@ -397,8 +385,11 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
           familyId: family_id,
           perguntarEssencial: perguntar_essencial,
         });
-      else await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
+      } else {
+        await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
+      }
       break;
+
     default:
       await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
   }
