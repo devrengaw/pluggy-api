@@ -201,8 +201,45 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   }
 }
 
+async function comandoSaldo(chatId, userId, familyId) {
+  const { data, error } = await supabase
+    .from("transacoes")
+    .select("tipo, valor")
+    .or(`user_id.eq.${userId},family_id.eq.${familyId}`);
+  if (error) {
+    console.error(error);
+    return await sendMessage(chatId, "⚠️ Erro ao calcular saldo.");
+  }
+  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
+  const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor), 0);
+  await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
+}
+
+async function comandoResumo(chatId, userId) {
+  const { data, error } = await supabase
+    .from("transacoes")
+    .select("tipo, valor, descricao, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(5);
+  if (error) {
+    console.error(error);
+    return await sendMessage(chatId, "⚠️ Erro ao gerar resumo.");
+  }
+  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação recente.");
+  const linhas = data
+    .map(
+      (t) =>
+        `${t.tipo === "entrada" ? "💰" : "💸"} ${t.descricao} — R$${t.valor} em ${new Date(
+          t.created_at
+        ).toLocaleDateString("pt-BR")}`
+    )
+    .join("\n");
+  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
+}
+
 /* ============================================================
-🔄 CALLBACKS
+🔄 CALLBACKS (helpers)
 ============================================================ */
 async function definirCategoria(transactionId, categoria, chatId) {
   await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
@@ -219,80 +256,256 @@ async function definirEssencialidade(transactionId, valor, chatId, userId) {
     .maybeSingle();
 
   await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
-  await atualizarMemoriaEssencial(userId, data.descricao, essencial);
+  if (data?.descricao) await atualizarMemoriaEssencial(userId, data.descricao, essencial);
 }
 
 /* ============================================================
-💬 COMANDOS /start e /menu
+🔑 GERAR TOKEN TELEGRAM
+============================================================ */
+app.post("/gerar-token-telegram", async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ success: false, message: "Usuário não informado" });
+
+    // Busca family_id do usuário
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, family_id")
+      .eq("id", user_id)
+      .maybeSingle();
+    if (!user) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+
+    // Desativa tokens anteriores
+    await supabase.from("telegram_tokens").update({ ativo: false }).eq("user_id", user_id);
+
+    // Gera token novo
+    const token = "TLG-" + randomUUID().split("-")[0].toUpperCase();
+    const { error } = await supabase.from("telegram_tokens").insert({
+      token,
+      user_id,
+      family_id: user.family_id || null,
+      ativo: true,
+      criado_em: new Date(),
+    });
+    if (error) throw error;
+
+    return res.json({ success: true, token, message: "Novo token Telegram gerado com sucesso." });
+  } catch (err) {
+    console.error("❌ Erro ao gerar token Telegram:", err);
+    return res.status(500).json({ success: false, message: "Erro ao gerar token.", error: err.message });
+  }
+});
+
+/* ============================================================
+🆓 TESTE DE 30 DIAS
+============================================================ */
+app.post("/ativar-teste", async (req, res) => {
+  const { user_id } = req.body;
+  try {
+    const { data: usuario } = await supabase
+      .from("users")
+      .select("plano, trial_ativo, trial_expira_em")
+      .eq("id", user_id)
+      .maybeSingle();
+
+    if (!usuario) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+    if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
+      return res.json({
+        success: false,
+        message: "Você já possui um teste ativo.",
+        expira_em: usuario.trial_expira_em,
+      });
+    }
+
+    const { error } = await supabase
+      .from("users")
+      .update({
+        plano: "pro",
+        trial_ativo: true,
+        trial_expira_em: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      })
+      .eq("id", user_id);
+
+    if (error) throw error;
+
+    res.json({ success: true, message: "✅ Teste de 30 dias ativado com sucesso!" });
+  } catch (err) {
+    console.error("Erro ao ativar teste:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ============================================================
+🤖 WEBHOOK TELEGRAM (com /start, /menu, /help e callbacks)
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
 
-  if (body.message) {
-    const chatId = body.message.chat.id;
-    const text = body.message.text?.trim();
+  // 🎛 CALLBACKS (categorias, essencial e menu)
+  if (body.callback_query) {
+    const cb = body.callback_query;
+    const chatId = cb.message.chat.id;
+    const data = cb.data;
 
-    // 🎉 Boas-vindas
-    if (text?.toLowerCase() === "/start") {
-      await sendMessage(
-        chatId,
-        "👋 *Bem-vindo(a) ao FinanceFlow!*\n\n" +
-          "Registre seus ganhos e gastos direto pelo Telegram, " +
-          "e veja tudo no painel do app.\n\n" +
-          "Envie mensagens como:\n" +
-          "`+2000 salário` — para registrar uma entrada\n" +
-          "`-150 mercado` — para registrar uma saída\n\n" +
-          "Use `/menu` para ver as opções e funções disponíveis.\n\n" +
-          "Se ainda não conectou sua conta:\n`/vincular TLG-XXXXXX`"
-      );
-      return res.sendStatus(200);
+    if (data.startsWith("cat_")) {
+      const [_, transacaoId, categoria] = data.split("_");
+      await definirCategoria(transacaoId, categoria, chatId);
+    } else if (data.startsWith("ess_")) {
+      const [_, transacaoId, valor] = data.split("_");
+      const usr = await buscarUsuario(chatId);
+      await definirEssencialidade(transacaoId, valor, chatId, usr?.user_id);
+    } else {
+      // Callbacks do menu
+      switch (data) {
+        case "ajuda_entrada":
+          await sendMessage(chatId, "💰 Envie algo como `+2000 salário` para registrar uma entrada.");
+          break;
+        case "ajuda_saida":
+          await sendMessage(chatId, "💸 Envie algo como `-150 mercado` para registrar uma saída.");
+          break;
+        case "ajuda_resumo":
+          await sendMessage(chatId, "📊 Veja seu resumo completo no app FinanceFlow na aba *Dashboard*.");
+          break;
+        case "ajuda_ia":
+          await sendMessage(chatId, "🤖 A IA classifica automaticamente suas transações e aprende seus hábitos!");
+          break;
+        case "ajuda_vinculo":
+          await sendMessage(chatId, "🔗 Gere um novo token no app (Configurações > Integração Telegram) e envie:\n`/vincular TLG-XXXXXX`");
+          break;
+      }
     }
 
-    // 🧭 Menu
-    if (text?.toLowerCase() === "/menu") {
-      const replyMarkup = {
-        inline_keyboard: [
-          [
-            { text: "💰 Registrar Entrada", callback_data: "ajuda_entrada" },
-            { text: "💸 Registrar Saída", callback_data: "ajuda_saida" },
-          ],
-          [
-            { text: "📊 Ver Resumo no App", callback_data: "ajuda_resumo" },
-            { text: "🧠 Como funciona a IA", callback_data: "ajuda_ia" },
-          ],
-          [{ text: "🔗 Vincular Conta", callback_data: "ajuda_vinculo" }],
-        ],
-      };
-      await sendMessage(chatId, "📋 *Menu de Comandos FinanceFlow*", replyMarkup);
-      return res.sendStatus(200);
-    }
+    await sendCallbackAnswer(cb.id);
+    return res.sendStatus(200);
   }
 
-      // 🆘 Ajuda /help
-    if (text?.toLowerCase() === "/help") {
-      await sendMessage(
-        chatId,
-        "*📖 Guia FinanceFlow — Ajuda Rápida*\n\n" +
-          "Veja como aproveitar o máximo do bot e do app:\n\n" +
-          "💰 *Registrar transações*\n" +
-          "Envie mensagens simples, como:\n" +
-          "`+2500 salário` → registra entrada\n" +
-          "`-150 mercado` → registra saída\n\n" +
-          "🧠 *IA Financeira*\n" +
-          "A IA identifica automaticamente se é fixo, variável ou essencial, " +
-          "e aprende com seus hábitos para classificar melhor as próximas transações.\n\n" +
-          "👨‍👩‍👧 *Hub Familiar*\n" +
-          "Convide familiares no app (aba *Hub Familiar*) para compartilhar o mesmo painel e ver as finanças juntos.\n\n" +
-          "📲 *Telegram + App*\n" +
-          "Tudo que você registra aqui aparece no painel principal do app.\n" +
-          "Se quiser reconectar o Telegram, vá em *Configurações > Integração Telegram* e gere um novo token.\n\n" +
-          "🔗 *Comandos úteis:*\n" +
-          "/menu — mostra opções principais\n" +
-          "/start — mensagem de boas-vindas\n" +
-          "/help — exibe este guia"
-      );
+  // 💬 MENSAGENS
+  const msg = body.message;
+  if (!msg) return res.sendStatus(200);
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim();
+  if (!text) return res.sendStatus(200);
+
+  // /start
+  if (text.toLowerCase() === "/start") {
+    await sendMessage(
+      chatId,
+      "👋 *Bem-vindo(a) ao FinanceFlow!*\n\n" +
+        "💡 Registre seus ganhos e gastos direto por aqui e veja tudo no app.\n\n" +
+        "Exemplos:\n`+2000 salário`\n`-150 mercado`\n\n" +
+        "Use /menu para ver as funções e /help para ajuda."
+    );
+    return res.sendStatus(200);
+  }
+
+  // /menu
+  if (text.toLowerCase() === "/menu") {
+    const replyMarkup = {
+      inline_keyboard: [
+        [
+          { text: "💰 Registrar Entrada", callback_data: "ajuda_entrada" },
+          { text: "💸 Registrar Saída", callback_data: "ajuda_saida" },
+        ],
+        [
+          { text: "📊 Ver Resumo no App", callback_data: "ajuda_resumo" },
+          { text: "🧠 Como funciona a IA", callback_data: "ajuda_ia" },
+        ],
+        [{ text: "🔗 Vincular Conta", callback_data: "ajuda_vinculo" }],
+      ],
+    };
+    await sendMessage(chatId, "📋 *Menu de Comandos FinanceFlow*", replyMarkup);
+    return res.sendStatus(200);
+  }
+
+  // /help
+  if (text.toLowerCase() === "/help") {
+    await sendMessage(
+      chatId,
+      "*📖 Guia FinanceFlow — Ajuda Rápida*\n\n" +
+        "💰 Registrar transações: `+2500 salário` ou `-150 mercado`\n" +
+        "🧠 IA aprende seus hábitos e classifica tudo.\n" +
+        "👨‍👩‍👧 Hub Familiar: compartilhe o dashboard com sua família.\n" +
+        "🔗 /menu — ver comandos\n/start — boas-vindas\n/help — este guia."
+    );
+    return res.sendStatus(200);
+  }
+
+  // /vincular TLG-XXXXXX
+  if (text.toLowerCase().startsWith("/vincular")) {
+    const parts = text.split(" ");
+    const token = parts[1]?.trim();
+
+    if (!token || !token.startsWith("TLG-")) {
+      await sendMessage(chatId, "❌ Formato inválido. Envie assim:\n`/vincular TLG-XXXXXX`");
       return res.sendStatus(200);
     }
+
+    const { data: tokenData } = await supabase
+      .from("telegram_tokens")
+      .select("id, user_id, family_id, ativo")
+      .eq("token", token)
+      .maybeSingle();
+
+    if (!tokenData || !tokenData.ativo) {
+      await sendMessage(chatId, "⚠️ Token inválido ou expirado. Gere um novo no FinanceFlow.");
+      return res.sendStatus(200);
+    }
+
+    await supabase.from("telegram_users").upsert({
+      chat_id: chatId.toString(),
+      user_id: tokenData.user_id,
+      family_id: tokenData.family_id,
+      perguntar_essencial: true,
+      conectado: true,
+      atualizado_em: new Date(),
+    });
+
+    await supabase.from("telegram_tokens").update({ ativo: false }).eq("id", tokenData.id);
+
+    await sendMessage(chatId, "✅ Conta vinculada com sucesso! Agora você pode registrar transações por aqui.");
+    return res.sendStatus(200);
+  }
+
+  // Verifica vínculo
+  const usr = await buscarUsuario(chatId);
+  if (!usr) {
+    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
+    return res.sendStatus(200);
+  }
+
+  // IA e registro
+  const { user_id, family_id, perguntar_essencial } = usr;
+  const interpret = await interpretarMensagem(text);
+
+  switch (interpret.acao) {
+    case "entrada":
+    case "saida":
+      if (interpret.valor) {
+        await registrarTransacao({
+          tipo: interpret.acao,
+          valor: interpret.valor,
+          descricao: interpret.descricao,
+          chatId,
+          userId: user_id,
+          familyId: family_id,
+          perguntarEssencial: perguntar_essencial,
+        });
+      } else {
+        await sendMessage(chatId, "💬 Envie algo como `+2000 salário` ou `-150 mercado`");
+      }
+      break;
+
+    case "saldo":
+      await comandoSaldo(chatId, user_id, family_id);
+      break;
+
+    case "resumo":
+      await comandoResumo(chatId, user_id);
+      break;
+
+    default:
+      await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
+  }
 
   res.sendStatus(200);
 });
@@ -305,6 +518,7 @@ supabaseRealtime
   .channel("transacoes_updates")
   .on("postgres_changes", { event: "*", schema: "public", table: "transacoes" }, async (payload) => {
     console.log("📡 Mudança detectada em transações:", payload.eventType, payload.new);
+    // intencionalmente sem sendMessage aqui para evitar "Nova transação" duplicado
   })
   .subscribe();
 
