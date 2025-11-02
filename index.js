@@ -250,6 +250,8 @@ supabaseRealtime
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
+
+  // 🎛 CALLBACKS (botões de categoria / essencial)
   if (body.callback_query) {
     const cb = body.callback_query;
     const chatId = cb.message.chat.id;
@@ -271,12 +273,53 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     return res.sendStatus(200);
   }
 
+  // 💬 MENSAGENS
   const msg = body.message;
   if (!msg) return res.sendStatus(200);
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
   if (!text) return res.sendStatus(200);
 
+  // 🔑 VINCULAÇÃO VIA TOKEN
+  if (text.toLowerCase().startsWith("/vincular")) {
+    const parts = text.split(" ");
+    const token = parts[1]?.trim();
+
+    if (!token || !token.startsWith("TLG-")) {
+      await sendMessage(chatId, "❌ Formato inválido. Envie assim:\n`/vincular TLG-XXXXXX`");
+      return res.sendStatus(200);
+    }
+
+    const { data: tokenData } = await supabase
+      .from("telegram_tokens")
+      .select("id, user_id, family_id, ativo")
+      .eq("token", token)
+      .maybeSingle();
+
+    if (!tokenData || !tokenData.ativo) {
+      await sendMessage(chatId, "⚠️ Token inválido ou expirado. Gere um novo no FinanceFlow.");
+      return res.sendStatus(200);
+    }
+
+    await supabase.from("telegram_users").upsert({
+      chat_id: chatId.toString(),
+      user_id: tokenData.user_id,
+      family_id: tokenData.family_id,
+      perguntar_essencial: true,
+      conectado: true,
+      atualizado_em: new Date(),
+    });
+
+    await supabase.from("telegram_tokens").update({
+      ativo: false,
+      usado_em: new Date(),
+    }).eq("id", tokenData.id);
+
+    await sendMessage(chatId, "✅ Conta vinculada com sucesso! Agora você pode registrar transações por aqui.");
+    return res.sendStatus(200);
+  }
+
+  // 🔍 VERIFICA USUÁRIO JÁ VINCULADO
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
@@ -306,6 +349,37 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   }
 
   res.sendStatus(200);
+});
+
+/* ============================================================
+🔐 GERAR TOKEN TELEGRAM
+============================================================ */
+import { randomUUID } from "crypto";
+
+app.post("/gerar-token-telegram", async (req, res) => {
+  try {
+    const { user_id, family_id } = req.body;
+    if (!user_id) return res.status(400).json({ success: false, message: "Usuário não informado" });
+
+    const token = "TLG-" + randomUUID().split("-")[0].toUpperCase();
+
+    await supabase.from("telegram_tokens").update({ ativo: false }).eq("user_id", user_id);
+
+    const { error } = await supabase.from("telegram_tokens").insert({
+      token,
+      user_id,
+      family_id: family_id || null,
+      ativo: true,
+      criado_em: new Date(),
+    });
+
+    if (error) throw error;
+
+    return res.json({ success: true, token, message: "Novo token Telegram gerado com sucesso." });
+  } catch (err) {
+    console.error("Erro ao gerar token Telegram:", err);
+    return res.status(500).json({ success: false, message: "Erro ao gerar token.", error: err.message });
+  }
 });
 
 /* ============================================================
