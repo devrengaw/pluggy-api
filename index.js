@@ -345,22 +345,24 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
+  
+/* ============================================================
+// 📸 DETECTA ENVIO DE FOTO (nota fiscal ou recibo) — VERSÃO OCR + IA
+  ============================================================ */
+  
+import Tesseract from "tesseract.js";
 
-// 📸 DETECTA ENVIO DE FOTO (nota fiscal ou recibo)
 if (msg.photo && msg.photo.length > 0) {
   try {
-    // 1) Pega a melhor resolução
     const fileId = msg.photo[msg.photo.length - 1].file_id;
 
-    // 2) Resolve o caminho do arquivo no Telegram
+    // 📥 Baixa imagem do Telegram
     const tgResp = await fetch(
       `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`
     );
     const fileInfo = await tgResp.json();
-
-    if (!fileInfo?.ok || !fileInfo?.result?.file_path) {
-      console.error("getFile falhou:", fileInfo);
-      await sendMessage(chatId, "⚠️ Não consegui baixar a imagem. Tente reenviar.");
+    if (!fileInfo?.ok) {
+      await sendMessage(chatId, "⚠️ Erro ao baixar imagem. Tente novamente.");
       return res.sendStatus(200);
     }
 
@@ -369,56 +371,53 @@ if (msg.photo && msg.photo.length > 0) {
 
     await sendMessage(chatId, "🧾 Recebido! Estou lendo sua nota fiscal...");
 
-    // 3) Prompt de extração (curto e objetivo)
-    const extractPrompt =
-      "Extraia da imagem da nota fiscal o valor total (número, ponto decimal) e o nome do estabelecimento. " +
-      "Responda APENAS em JSON como: {\"valor\": 152.35, \"descricao\": \"Supermercado XPTO\"}";
-
-    // 4) Chamada de visão com Responses API (mais estável p/ imagem)
-    const vision = await openai.responses.create({
-      model: "gpt-4o-mini",
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: extractPrompt },
-            { type: "input_image", image_url: { url: fileUrl } },
-          ],
-        },
-      ],
-      temperature: 0.0,
+    // 🔠 OCR: extrai texto da imagem
+    const ocrResult = await Tesseract.recognize(fileUrl, "por", {
+      logger: (info) => console.log("📄 OCR:", info.status, info.progress),
     });
 
-    // 5) Extrai texto consolidado
-    const outText =
-      vision.output_text ??
-      (vision?.output?.[0]?.content?.[0]?.text ?? "").toString();
+    const textoExtraido = ocrResult.data.text;
+    console.log("🧠 Texto OCR extraído:", textoExtraido.slice(0, 300));
 
-    // 6) Parse do JSON
-    let dataExtraida = null;
-    try {
-      const match = outText.match(/\{[\s\S]*\}/);
-      dataExtraida = match ? JSON.parse(match[0]) : JSON.parse(outText);
-    } catch (e) {
-      console.error("Parse JSON visão falhou. Texto:", outText);
-    }
+    // 🧠 Envia texto para IA interpretar
+    const prompt = `
+Você é um assistente financeiro.
+Analise o texto de uma nota fiscal abaixo e extraia:
+- O valor total da compra (ex: 153.29)
+- O nome do estabelecimento (se disponível)
 
-    if (!dataExtraida?.valor || isNaN(Number(dataExtraida.valor))) {
-      await sendMessage(
-        chatId,
-        "⚠️ Não consegui identificar o valor total na imagem. Tente uma foto mais nítida (mostrando o total)."
-      );
+Responda APENAS em JSON:
+{
+  "valor": número,
+  "descricao": "texto breve"
+}
+
+Texto da nota:
+"""
+${textoExtraido}
+"""
+`;
+
+    const aiResult = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+    });
+
+    const raw = aiResult.choices[0].message.content.trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    const dataExtraida = match ? JSON.parse(match[0]) : null;
+
+    if (!dataExtraida?.valor) {
+      await sendMessage(chatId, "⚠️ Não consegui identificar o valor total. Envie uma imagem mais nítida.");
       return res.sendStatus(200);
     }
 
-    const valorNum = Number(dataExtraida.valor);
-    const desc = (dataExtraida.descricao || "Compra").toString().slice(0, 60);
-
-    // 7) Confirmação antes de registrar
+    // 💬 Confirmação antes de registrar
     const replyMarkup = {
       inline_keyboard: [
         [
-          { text: "✅ Confirmar", callback_data: `conf_foto_${valorNum}_${desc}` },
+          { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${dataExtraida.descricao}` },
           { text: "❌ Cancelar", callback_data: "cancelar_foto" },
         ],
       ],
@@ -426,22 +425,14 @@ if (msg.photo && msg.photo.length > 0) {
 
     await sendMessage(
       chatId,
-      `Detectei *R$${valorNum.toFixed(2)}* em *${desc}*.\nDeseja registrar essa compra como saída?`,
+      `Detectei *R$${dataExtraida.valor}* em *${dataExtraida.descricao}*.\nDeseja registrar essa compra como saída?`,
       replyMarkup
     );
 
     return res.sendStatus(200);
   } catch (err) {
-    // Log detalhado para debug
-    console.error("Erro IA (visão) ao analisar imagem:", {
-      message: err?.message,
-      data: err?.response?.data,
-      stack: err?.stack,
-    });
-    await sendMessage(
-      chatId,
-      "❌ Ocorreu um erro ao analisar a imagem. Tente novamente com uma foto mais nítida."
-    );
+    console.error("❌ Erro OCR+IA:", err);
+    await sendMessage(chatId, "⚠️ Ocorreu um erro ao analisar a nota. Tente novamente.");
     return res.sendStatus(200);
   }
 }
