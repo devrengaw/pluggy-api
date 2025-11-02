@@ -51,6 +51,7 @@ async function buscarUsuario(chatId) {
   return data || null;
 }
 
+
 /* ============================================================
 🧠 INTERPRETAÇÃO NATURAL (IA)
 ============================================================ */
@@ -125,7 +126,7 @@ async function atualizarMemoriaEssencial(userId, descricao, essencial) {
 }
 
 /* ============================================================
-💡 Heurística: Fixa / Variável
+💡 Heurística: Fixa / Variável / Essencial
 ============================================================ */
 function detectarTipoFixo(descricao) {
   const fixas = ["aluguel", "condominio", "energia", "internet", "telefone", "plano", "mensalidade"];
@@ -137,10 +138,11 @@ function detectarTipoFixo(descricao) {
 }
 
 /* ============================================================
-💰 TRANSAÇÕES
+💰 TRANSAÇÕES E RELATÓRIOS
 ============================================================ */
 async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
   const tipo_fixo = detectarTipoFixo(descricao);
+
   const { data, error } = await supabase
     .from("transacoes")
     .insert({
@@ -164,6 +166,59 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
 
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
   await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
+
+  // 🗂 Categoria
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: "🍽 Alimentação", callback_data: `cat_${data.id}_alimentacao` },
+        { text: "🏠 Moradia", callback_data: `cat_${data.id}_moradia` },
+      ],
+      [
+        { text: "🚗 Transporte", callback_data: `cat_${data.id}_transporte` },
+        { text: "🎉 Lazer", callback_data: `cat_${data.id}_lazer` },
+      ],
+      [
+        { text: "💊 Saúde", callback_data: `cat_${data.id}_saude` },
+        { text: "💼 Trabalho", callback_data: `cat_${data.id}_trabalho` },
+      ],
+    ],
+  };
+  await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
+
+  // 🧠 Pergunta “essencial” apenas se for SAÍDA
+  if (tipo === "saida" && perguntarEssencial) {
+    const replyMarkupEss = {
+      inline_keyboard: [
+        [
+          { text: "🟢 Essencial", callback_data: `ess_${data.id}_true` },
+          { text: "🔴 Não essencial", callback_data: `ess_${data.id}_false` },
+        ],
+      ],
+    };
+    await sendMessage(chatId, "Essa despesa é essencial?", replyMarkupEss);
+  }
+}
+
+/* ============================================================
+🔄 CALLBACKS
+============================================================ */
+async function definirCategoria(transactionId, categoria, chatId) {
+  await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
+  await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
+}
+
+async function definirEssencialidade(transactionId, valor, chatId, userId) {
+  const essencial = valor === "true";
+  const { data } = await supabase
+    .from("transacoes")
+    .update({ essencial })
+    .eq("id", transactionId)
+    .select("descricao")
+    .maybeSingle();
+
+  await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
+  await atualizarMemoriaEssencial(userId, data.descricao, essencial);
 }
 
 /* ============================================================
