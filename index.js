@@ -523,7 +523,101 @@ supabaseRealtime
   .subscribe();
 
 /* ============================================================
+🔌 DESCONECTAR TELEGRAM
+============================================================ */
+app.post("/desconectar-telegram", async (req, res) => {
+  const { user_id } = req.body;
+
+  // 🚨 Verificação inicial
+  if (!user_id)
+    return res.status(400).json({
+      success: false,
+      message: "Usuário não informado.",
+    });
+
+  try {
+    // 1️⃣ Atualiza o status do usuário no Telegram
+    const { error: userError } = await supabase
+      .from("telegram_users")
+      .update({
+        conectado: false,
+        atualizado_em: new Date(),
+      })
+      .eq("user_id", user_id);
+
+    if (userError) throw userError;
+
+    // 2️⃣ Desativa tokens vinculados
+    const { error: tokenError } = await supabase
+      .from("telegram_tokens")
+      .update({
+        ativo: false,
+        usado_em: new Date(),
+      })
+      .eq("user_id", user_id);
+
+    if (tokenError) throw tokenError;
+
+    // 3️⃣ Retorno de sucesso
+    console.log(`🔌 Usuário ${user_id} desconectado do Telegram com sucesso.`);
+    return res.json({
+      success: true,
+      message: "🔌 Telegram desconectado com sucesso.",
+    });
+  } catch (err) {
+    console.error("❌ Erro ao desconectar Telegram:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao desconectar Telegram.",
+      error: err.message,
+    });
+  }
+});
+
+/* ============================================================
 🌐 SERVER
 ============================================================ */
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`✅ Server online na porta ${port}`));
+
+/* ============================================================
+🔌 DESCONECTAR TELEGRAM — botão no app
+============================================================ */
+app.post("/desconectar-telegram", async (req, res) => {
+  const { user_id } = req.body;
+
+  if (!user_id)
+    return res.status(400).json({ success: false, message: "Usuário não informado" });
+
+  try {
+    // Desconecta o usuário no telegram_users
+    await supabase
+      .from("telegram_users")
+      .update({
+        conectado: false,
+        atualizado_em: new Date(),
+      })
+      .eq("user_id", user_id);
+
+    // Invalida todos os tokens ativos
+    await supabase
+      .from("telegram_tokens")
+      .update({
+        ativo: false,
+        usado_em: new Date(),
+      })
+      .eq("user_id", user_id);
+
+    return res.json({
+      success: true,
+      message: "🔌 Telegram desconectado com sucesso.",
+    });
+  } catch (err) {
+    console.error("Erro ao desconectar Telegram:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao desconectar Telegram.",
+      error: err.message,
+    });
+  }
+});
