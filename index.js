@@ -350,6 +350,79 @@ app.post("/ativar-teste", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/* ============================================================
+💳 ENDPOINT UNIVERSAL — Registrar compra no cartão (Telegram + Web)
+============================================================ */
+
+app.post("/registrar-compra-credito", async (req, res) => {
+  try {
+    const { user_id, family_id, card_id, valor, descricao, parcelas = 1 } = req.body;
+
+    if (!user_id || !card_id || !valor || !descricao) {
+      return res.status(400).json({
+        success: false,
+        message: "Parâmetros incompletos. Envie user_id, card_id, valor e descricao.",
+      });
+    }
+
+    // Busca informações do cartão
+    const { data: card, error: cardError } = await supabase
+      .from("cards")
+      .select("*")
+      .eq("id", card_id)
+      .maybeSingle();
+
+    if (cardError || !card) throw new Error("Cartão não encontrado.");
+
+    // Calcula as datas de fatura
+    function calcularDataFatura(diaFechamento, offsetMes = 0) {
+      const hoje = new Date();
+      return new Date(hoje.getFullYear(), hoje.getMonth() + offsetMes, diaFechamento);
+    }
+
+    // Cria as parcelas da compra
+    for (let i = 1; i <= parcelas; i++) {
+      const dataFatura = calcularDataFatura(card.dia_fechamento, i - 1);
+      const { error: txError } = await supabase.from("transacoes").insert({
+        tipo: "saida",
+        valor: valor / parcelas,
+        descricao,
+        card_id: card.id,
+        user_id,
+        family_id,
+        parcelas,
+        parcela_atual: i,
+        data_compra: new Date(),
+        data_fatura: dataFatura,
+        pago: false,
+      });
+      if (txError) throw txError;
+    }
+
+    // Atualiza saldo do cartão
+    const { error: saldoError } = await supabase.rpc("atualizar_saldo_cartao", {
+      p_card_id: card.id,
+      p_valor: valor,
+    });
+    if (saldoError) throw saldoError;
+
+    return res.json({
+      success: true,
+      message: `💳 Compra registrada: ${descricao} — R$${valor.toFixed(
+        2
+      )} (${parcelas}x no cartão ${card.apelido})`,
+    });
+  } catch (err) {
+    console.error("❌ Erro registrar-compra-credito:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao registrar compra no cartão.",
+      error: err.message,
+    });
+  }
+});
+
 /* ============================================================
 🤖 WEBHOOK TELEGRAM (com /start, /menu, /help e leitura de foto)
 ============================================================ */
