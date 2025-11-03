@@ -301,25 +301,24 @@ app.post("/gerar-token-telegram", async (req, res) => {
 });
 
 /* ============================================================
-🆓 TESTE DE 30 DIAS
+🆓 TESTE PREMIUM DE 30 DIAS (acesso total)
 ============================================================ */
 app.post("/ativar-teste", async (req, res) => {
   const { user_id } = req.body;
 
   try {
-    // Busca o usuário
     const { data: usuario, error } = await supabase
       .from("users")
-      .select("plano, trial_ativo, trial_expira_em, trial_utilizado")
+      .select("plano, trial_ativo, trial_utilizado, trial_expira_em")
       .eq("id", user_id)
       .maybeSingle();
 
     if (error || !usuario)
-      return res.status(404).json({ success: false, message: "Usuário não encontrado" });
+      return res.status(404).json({ success: false, message: "Usuário não encontrado." });
 
     // ❌ Já usou o teste uma vez?
     if (usuario.trial_utilizado)
-      return res.json({ success: false, message: "Você já usou seu teste gratuito." });
+      return res.json({ success: false, message: "Você já utilizou seu teste gratuito." });
 
     // ⏳ Já possui um teste ativo?
     if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
@@ -330,22 +329,21 @@ app.post("/ativar-teste", async (req, res) => {
       });
     }
 
-    // ✅ Ativa o teste
-    const expiraEm = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-
+    // ✅ Ativa o teste Premium
+    const expiraEm = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 dias
     await supabase
       .from("users")
       .update({
-        plano: "pro",
+        plano: "premium",          // 🔹 Durante o teste, o plano é Premium
         trial_ativo: true,
-        trial_utilizado: true, // marca que já usou
+        trial_utilizado: true,     // 🔹 Marca como usado
         trial_expira_em: expiraEm,
       })
       .eq("id", user_id);
 
-    res.json({
+    return res.json({
       success: true,
-      message: "✅ Teste de 30 dias ativado com sucesso!",
+      message: "🧪 Teste Premium ativado com sucesso por 30 dias!",
       expira_em: expiraEm,
     });
   } catch (err) {
@@ -896,25 +894,32 @@ app.post("/desconectar-telegram", async (req, res) => {
 ============================================================ */
 const port = process.env.PORT || 10000;
 
+/* ============================================================
+🕒 VERIFICAÇÃO AUTOMÁTICA DE TESTES EXPIRADOS
+============================================================ */
 app.post("/verificar-trials", async (req, res) => {
   try {
     const hoje = new Date();
 
+    // Busca usuários cujo teste expirou
     const { data: expirados } = await supabase
       .from("users")
-      .select("id")
+      .select("id, plano")
       .eq("trial_ativo", true)
       .lte("trial_expira_em", hoje.toISOString());
 
     for (const usr of expirados || []) {
+      // Regride automaticamente para plano Starter
       await supabase
         .from("users")
         .update({ trial_ativo: false, plano: "starter" })
         .eq("id", usr.id);
     }
 
-    res.json({ success: true, count: expirados.length });
+    console.log(`🕒 Trials expirados verificados: ${expirados?.length || 0}`);
+    res.json({ success: true, count: expirados?.length || 0 });
   } catch (err) {
+    console.error("Erro ao verificar trials:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
