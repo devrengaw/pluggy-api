@@ -819,4 +819,28 @@ app.post("/desconectar-telegram", async (req, res) => {
 🌐 SERVER
 ============================================================ */
 const port = process.env.PORT || 10000;
+
+app.post("/verificar-trials", async (req, res) => {
+  try {
+    const hoje = new Date();
+
+    const { data: expirados } = await supabase
+      .from("users")
+      .select("id")
+      .eq("trial_ativo", true)
+      .lte("trial_expira_em", hoje.toISOString());
+
+    for (const usr of expirados || []) {
+      await supabase
+        .from("users")
+        .update({ trial_ativo: false, plano: "starter" })
+        .eq("id", usr.id);
+    }
+
+    res.json({ success: true, count: expirados.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.listen(port, () => console.log(`✅ Server online na porta ${port}`));
