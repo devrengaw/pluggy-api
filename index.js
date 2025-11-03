@@ -169,24 +169,27 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
   await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
 
-  // 🗂 Categoria
-  const replyMarkup = {
-    inline_keyboard: [
-      [
-        { text: "🍽 Alimentação", callback_data: `cat_${data.id}_alimentacao` },
-        { text: "🏠 Moradia", callback_data: `cat_${data.id}_moradia` },
-      ],
-      [
-        { text: "🚗 Transporte", callback_data: `cat_${data.id}_transporte` },
-        { text: "🎉 Lazer", callback_data: `cat_${data.id}_lazer` },
-      ],
-      [
-        { text: "💊 Saúde", callback_data: `cat_${data.id}_saude` },
-        { text: "💼 Trabalho", callback_data: `cat_${data.id}_trabalho` },
-      ],
-    ],
-  };
+  // 🗂 Categoria // 🗂 Buscar categorias do Supabase
+  
+const { data: categorias } = await supabase
+  .from("categorias")
+  .select("nome")
+  .or(`user_id.eq.${userId},padrao.eq.true`)
+  .order("nome", { ascending: true });
+
+// 🗂 Criar menu dinâmico
+if (categorias?.length) {
+  const inlineKeyboard = [];
+  for (let i = 0; i < categorias.length; i += 2) {
+    const linha = categorias.slice(i, i + 2).map((c) => ({
+      text: c.nome,
+      callback_data: `cat_${data.id}_${c.nome}`,
+    }));
+    inlineKeyboard.push(linha);
+  }
+  const replyMarkup = { inline_keyboard: inlineKeyboard };
   await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
+}
 
   // 🧠 Pergunta “essencial” apenas se for SAÍDA
   if (tipo === "saida" && perguntarEssencial) {
