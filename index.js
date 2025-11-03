@@ -302,16 +302,23 @@ app.post("/gerar-token-telegram", async (req, res) => {
 ============================================================ */
 app.post("/ativar-teste", async (req, res) => {
   const { user_id } = req.body;
+
   try {
+    // Busca o usuário
     const { data: usuario, error } = await supabase
       .from("users")
-      .select("plano, trial_ativo, trial_expira_em")
+      .select("plano, trial_ativo, trial_expira_em, trial_utilizado")
       .eq("id", user_id)
       .maybeSingle();
 
     if (error || !usuario)
       return res.status(404).json({ success: false, message: "Usuário não encontrado" });
 
+    // ❌ Já usou o teste uma vez?
+    if (usuario.trial_utilizado)
+      return res.json({ success: false, message: "Você já usou seu teste gratuito." });
+
+    // ⏳ Já possui um teste ativo?
     if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
       return res.json({
         success: false,
@@ -320,6 +327,7 @@ app.post("/ativar-teste", async (req, res) => {
       });
     }
 
+    // ✅ Ativa o teste
     const expiraEm = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     await supabase
@@ -327,6 +335,7 @@ app.post("/ativar-teste", async (req, res) => {
       .update({
         plano: "pro",
         trial_ativo: true,
+        trial_utilizado: true, // marca que já usou
         trial_expira_em: expiraEm,
       })
       .eq("id", user_id);
