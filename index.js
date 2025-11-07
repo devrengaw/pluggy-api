@@ -924,7 +924,6 @@ if (text?.toLowerCase() === "/desfazer" || text?.toLowerCase() === "/apagar") {
       await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
   }
 
-  default:
   const comando = text?.toLowerCase().trim();
 
   // 🗑️ Ações manuais de desfazer / apagar
