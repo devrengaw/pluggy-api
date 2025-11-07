@@ -208,7 +208,7 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
     const { data: cat1, error: e1 } = await supabase
       .from("categorias")
       .select("nome, padrao, user_id")
-      .or(`user_id.eq.${userId},padrao.eq.true`)
+      .or(`user_id.eq.${userId || "00000000-0000-0000-0000-000000000000"},padrao.is.true`)
       .order("nome", { ascending: true });
 
     if (e1) {
@@ -549,13 +549,32 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // ⚙️ ESSENCIALIDADE
-      if (data.startsWith("ess_")) {
-        const [_, transacaoId, valor] = data.split("_");
-        await definirEssencialidade(transacaoId, valor, chatId, userId);
-        await sendMessage(chatId, valor === "true" ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
-        return res.sendStatus(200);
-      }
+     // ⚙️ ESSENCIALIDADE 
+if (data.startsWith("ess_")) {
+  const [_, transacaoId, valor] = data.split("_");
+
+  // responde imediatamente ao Telegram para evitar reenvio do mesmo callback
+  try {
+    await sendCallbackAnswer(cb.id, "✅ Atualizado!");
+  } catch (e) {
+    console.warn("⚠️ Falha ao responder callback rapidamente:", e);
+  }
+
+  // processa a atualização de forma assíncrona
+  definirEssencialidade(transacaoId, valor, chatId, userId)
+    .then(() => {
+      sendMessage(
+        chatId,
+        valor === "true"
+          ? "🟢 Marcado como *essencial*"
+          : "🔴 Marcado como *não essencial*"
+      );
+    })
+    .catch((e) => console.error("❌ Erro definirEssencialidade:", e));
+
+  // encerra imediatamente para o Telegram não repetir o evento
+  return res.sendStatus(200);
+}
 
       // 🗑️ CONFIRMAR EXCLUSÃO DE TRANSAÇÃO
       if (data.startsWith("del_")) {
