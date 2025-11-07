@@ -836,17 +836,8 @@ if (text?.toLowerCase() === "/desvincular") {
       return res.sendStatus(200);
     }
 
-    // ❌ Desvincula e marca como desconectado
-    await supabase
-      .from("telegram_users")
-      .update({
-        conectado: false,
-        atualizado_em: new Date(),
-      })
-      .eq("chat_id", chatIdStr);
-
-    // Opcional: remover o vínculo completamente
-    await supabase.from("telegram_users").delete().eq("chat_id", chatIdStr);
+   // 🔥 Remove completamente o vínculo
+await supabase.from("telegram_users").delete().eq("chat_id", chatIdStr);
 
     // 🔒 Log e retorno visual
     console.log(`🔌 Conta desvinculada do Telegram: chat_id ${chatIdStr}`);
