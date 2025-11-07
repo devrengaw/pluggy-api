@@ -781,17 +781,27 @@ if (text.toLowerCase().startsWith("/vincular")) {
   // 🚨 Antes de vincular, remove qualquer vínculo existente com o mesmo chat_id
   await supabase.from("telegram_users").delete().eq("chat_id", chatId.toString());
 
-  // ✅ Vincula conta
-  const { error: upsertError } = await supabase.from("telegram_users").insert({
-    chat_id: chatId.toString(),
-    user_id: tokenData.user_id,
-    family_id: tokenData.family_id || null,
-    perguntar_essencial: true,
-    conectado: true,
-    atualizado_em: new Date(),
-    criado_em: new Date(),
-  });
+ // 🧩 Garante que o family_id esteja atualizado
+let familyId = tokenData.family_id;
+if (!familyId) {
+  const { data: userData } = await supabase
+    .from("users")
+    .select("family_id")
+    .eq("id", tokenData.user_id)
+    .maybeSingle();
+  familyId = userData?.family_id || null;
+}
 
+// ✅ Vincula conta com o family_id garantido
+const { error: upsertError } = await supabase.from("telegram_users").insert({
+  chat_id: chatId.toString(),
+  user_id: tokenData.user_id,
+  family_id: familyId, // ← aqui é o ponto chave
+  perguntar_essencial: true,
+  conectado: true,
+  atualizado_em: new Date(),
+  criado_em: new Date(),
+});
   if (upsertError) {
     console.error("❌ Erro ao vincular Telegram:", upsertError);
     await sendMessage(chatId, "⚠️ Erro ao vincular conta. Tente novamente.");
