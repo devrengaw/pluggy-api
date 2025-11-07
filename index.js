@@ -199,32 +199,28 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
   await sendMessage(chatId, `${label}: R$${Number(valor).toFixed(2)} — ${descricao}`);
 
-  // 🔎 Busca categorias (resiliente)
+   // 🔎 Busca categorias (corrigido e compatível)
   let categorias = [];
   try {
-    const query = supabase.from("categorias").select("nome").order("nome", { ascending: true });
-
-    // tenta user_id + padrao (se existir)
-    const { data: cat1, error: e1 } = await supabase
+    
+    // 🔧 Busca tanto categorias padrão (padrao = true) quanto do usuário atual
+    const { data: catData, error: catError } = await supabase
       .from("categorias")
-      .select("nome, padrao, user_id")
-      .or(`user_id.eq.${userId || "00000000-0000-0000-0000-000000000000"},padrao.is.true`)
+      .select("id, nome, padrao, user_id")
+      .or(`user_id.eq."${userId}",padrao.is.true`)
       .order("nome", { ascending: true });
 
-    if (e1) {
-      console.warn("⚠️ categorias: falha em or(user_id,padrao). Tentando somente user_id…", e1.message);
-      const { data: cat2, error: e2 } = await query.eq("user_id", userId);
-      if (e2) console.error("❌ categorias: erro ao buscar por user_id:", e2.message);
-      categorias = cat2 || [];
+    if (catError) {
+      console.error("⚠️ Erro ao buscar categorias:", catError);
     } else {
-      categorias = cat1 || [];
+      categorias = catData || [];
     }
   } catch (e) {
     console.error("❌ Erro inesperado buscando categorias:", e);
   }
 
   if (!categorias.length) {
-    console.log("ℹ️ Nenhuma categoria encontrada para montar o teclado.");
+    await sendMessage(chatId, "⚠️ Nenhuma categoria encontrada.");
   } else {
     const inlineKeyboard = [];
     for (let i = 0; i < categorias.length; i += 2) {
@@ -234,9 +230,12 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
       }));
       inlineKeyboard.push(linha);
     }
-    await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", { inline_keyboard: inlineKeyboard });
+    await sendMessage(chatId, "📂 Escolha uma categoria para essa transação:", {
+      inline_keyboard: inlineKeyboard,
+    });
   }
 
+  // ⚙️ Perguntar essencialidade apenas em saídas
   if (tipo === "saida" && perguntarEssencial) {
     const replyMarkupEss = {
       inline_keyboard: [
