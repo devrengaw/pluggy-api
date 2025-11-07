@@ -212,48 +212,30 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
 }
 
 async function comandoSaldo(chatId, userId, familyId) {
-  const { data, error } = await supabase
+  // 🔎 Busca somente transações do próprio usuário OU da família dele (se existir)
+  const { data: transacoes, error: transacoesError } = await supabase
     .from("transacoes")
     .select("tipo, valor")
-    // 🔎 Busca somente transações do próprio usuário OU da família dele (se existir)
-const { data, error } = await supabase
-  .from("transacoes")
-  .select("tipo, valor")
-  .or(
-    familyId
-      ? `user_id.eq.${userId},family_id.eq.${familyId}`
-      : `user_id.eq.${userId}`
-  );
-  if (error) {
-    console.error(error);
+    .or(
+      familyId
+        ? `user_id.eq.${userId},family_id.eq.${familyId}`
+        : `user_id.eq.${userId}`
+    );
+
+  if (transacoesError) {
+    console.error(transacoesError);
     return await sendMessage(chatId, "⚠️ Erro ao calcular saldo.");
   }
-  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
-  const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor), 0);
-  await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
-}
 
-async function comandoResumo(chatId, userId) {
-  const { data, error } = await supabase
-    .from("transacoes")
-    .select("tipo, valor, descricao, created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(5);
-  if (error) {
-    console.error(error);
-    return await sendMessage(chatId, "⚠️ Erro ao gerar resumo.");
-  }
-  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação recente.");
-  const linhas = data
-    .map(
-      (t) =>
-        `${t.tipo === "entrada" ? "💰" : "💸"} ${t.descricao} — R$${t.valor} em ${new Date(
-          t.created_at
-        ).toLocaleDateString("pt-BR")}`
-    )
-    .join("\n");
-  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
+  if (!transacoes?.length)
+    return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
+
+  const total = transacoes.reduce(
+    (acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor),
+    0
+  );
+
+  await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
 }
 
 /* ============================================================
