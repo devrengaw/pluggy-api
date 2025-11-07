@@ -215,7 +215,15 @@ async function comandoSaldo(chatId, userId, familyId) {
   const { data, error } = await supabase
     .from("transacoes")
     .select("tipo, valor")
-    .or(`user_id.eq.${userId},family_id.eq.${familyId}`);
+    // 🔎 Busca somente transações do próprio usuário OU da família dele (se existir)
+const { data, error } = await supabase
+  .from("transacoes")
+  .select("tipo, valor")
+  .or(
+    familyId
+      ? `user_id.eq.${userId},family_id.eq.${familyId}`
+      : `user_id.eq.${userId}`
+  );
   if (error) {
     console.error(error);
     return await sendMessage(chatId, "⚠️ Erro ao calcular saldo.");
