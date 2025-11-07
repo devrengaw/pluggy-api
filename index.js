@@ -984,6 +984,80 @@ app.post("/desconectar-telegram", async (req, res) => {
 });
 
 /* ============================================================
+🧹 LIMPAR HISTÓRICO — ENTRADAS, SAÍDAS E DADOS COMPLETOS
+============================================================ */
+
+// 🔹 1️⃣ Apenas Entradas e Saídas
+app.post("/limpar-transacoes", async (req, res) => {
+  const { user_id } = req.body;
+  if (!user_id)
+    return res.status(400).json({ success: false, message: "Usuário não informado." });
+
+  try {
+    await supabase.from("transacoes").delete().eq("user_id", user_id);
+    await supabase.from("memoria_essenciais").delete().eq("user_id", user_id);
+
+    return res.json({ success: true, message: "🧾 Entradas e saídas apagadas com sucesso." });
+    
+    await supabase.from("logs_limpeza").insert({
+  user_id,
+  tipo_limpeza: "transacoes",
+});
+    
+  } catch (err) {
+    console.error("❌ Erro ao limpar histórico:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao limpar histórico.",
+      error: err.message,
+    });
+  }
+});
+
+// 🔹 2️⃣ Limpeza Completa (menos Telegram e plano)
+app.post("/limpar-dados-completos", async (req, res) => {
+  const { user_id } = req.body;
+  if (!user_id)
+    return res.status(400).json({ success: false, message: "Usuário não informado." });
+
+  try {
+    const tabelas = [
+      "transacoes",
+      "cards",
+      "dividas",
+      "relatorios_ia",
+      "investimentos",
+      "gestor_assinaturas",
+      "alertas_ia",
+      "memoria_essenciais",
+    ];
+
+    for (const tabela of tabelas) {
+      const { error } = await supabase.from(tabela).delete().eq("user_id", user_id);
+      if (error) console.warn(`⚠️ Erro ao limpar ${tabela}:`, error.message);
+    }
+
+    return res.json({
+      success: true,
+      message: "💣 Todos os dados financeiros e IA foram apagados com sucesso.",
+    });
+
+    await supabase.from("logs_limpeza").insert({
+  user_id,
+  tipo_limpeza: "completa",
+});
+    
+  } catch (err) {
+    console.error("❌ Erro ao limpar dados completos:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao limpar dados completos.",
+      error: err.message,
+    });
+  }
+});
+
+/* ============================================================
 🌐 SERVER
 ============================================================ */
 const port = process.env.PORT || 10000;
