@@ -543,13 +543,17 @@ if (body.callback_query) {
   console.log("🧩 Callback recebido:", data);
 
   try {
-    // ✅ CONFIRMAR FOTO
+    // ⚡ responde imediatamente ao Telegram
+    await sendCallbackAnswer(cb.id, "Processando...");
+
+    /* ===========================
+    ✅ CONFIRMAR FOTO
+    =========================== */
     if (data.startsWith("conf_foto_")) {
       const [_, valor, ...descParts] = data.split("_");
       const descricao = decodeURIComponent(descParts.join("_"));
       if (!user) {
         await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
-        await sendCallbackAnswer(cb.id);
         return res.sendStatus(200);
       }
 
@@ -564,11 +568,12 @@ if (body.callback_query) {
       });
 
       await sendMessage(chatId, "💸 Saída registrada com sucesso!");
-      await sendCallbackAnswer(cb.id);
       return res.sendStatus(200);
     }
 
-    // ✏️ CORRIGIR VALOR
+    /* ===========================
+    ✏️ CORRIGIR VALOR
+    =========================== */
     if (data.startsWith("corrigir_")) {
       const descricao = decodeURIComponent(data.replace("corrigir_", ""));
       await sendMessage(
@@ -583,64 +588,106 @@ if (body.callback_query) {
         atualizado_em: new Date(),
       });
 
-      await sendCallbackAnswer(cb.id);
       return res.sendStatus(200);
     }
 
-    // ❌ CANCELAR
+    /* ===========================
+    ❌ CANCELAR
+    =========================== */
     if (data === "cancelar_foto") {
       await sendMessage(chatId, "❌ Registro cancelado.");
-      await sendCallbackAnswer(cb.id);
       return res.sendStatus(200);
     }
 
-    // 🗂 CATEGORIA
+    /* ===========================
+    🗂 CATEGORIA
+    =========================== */
     if (data.startsWith("cat_")) {
-      const [_, transacaoId, categoria] = data.split("_");
+      // categoria pode conter underscore — por isso fazemos join
+      const [_, transacaoId, ...categoriaParts] = data.split("_");
+      const categoria = categoriaParts.join("_");
+
       await definirCategoria(transacaoId, categoria, chatId);
-      await sendCallbackAnswer(cb.id);
+      await sendMessage(chatId, `✅ Categoria *${categoria}* aplicada com sucesso!`);
       return res.sendStatus(200);
     }
 
-    // ⚙️ ESSENCIALIDADE
+    /* ===========================
+    ⚙️ ESSENCIALIDADE
+    =========================== */
     if (data.startsWith("ess_")) {
       const [_, transacaoId, valor] = data.split("_");
       await definirEssencialidade(transacaoId, valor, chatId, userId);
-      await sendCallbackAnswer(cb.id);
+      await sendMessage(
+        chatId,
+        valor === "true"
+          ? "🟢 Marcado como *essencial*"
+          : "🔴 Marcado como *não essencial*"
+      );
+      return res.sendStatus(200);
+    }
+
+    /* ===========================
+    📋 CALLBACKS DO MENU DE AJUDA
+    =========================== */
+    if (
+      ["ajuda_entrada", "ajuda_saida", "ajuda_resumo", "ajuda_ia", "ajuda_vinculo"].includes(data)
+    ) {
+      switch (data) {
+        case "ajuda_entrada":
+          await sendMessage(chatId, "💰 Envie algo como `+2000 salário` para registrar uma *entrada*.");
+          break;
+        case "ajuda_saida":
+          await sendMessage(chatId, "💸 Envie algo como `-150 mercado` para registrar uma *saída*.");
+          break;
+        case "ajuda_resumo":
+          await sendMessage(chatId, "📊 Veja seu resumo completo no app FinanceFlow, na aba *Dashboard*.");
+          break;
+        case "ajuda_ia":
+          await sendMessage(chatId, "🧠 A IA classifica automaticamente suas transações e aprende seus hábitos financeiros.");
+          break;
+        case "ajuda_vinculo":
+          await sendMessage(
+            chatId,
+            "🔗 Para vincular sua conta:\n" +
+              "1️⃣ Gere um novo token no app (Configurações → Integrações → Telegram)\n" +
+              "2️⃣ Envie aqui `/vincular TLG-XXXXXX`"
+          );
+          break;
+      }
+
       return res.sendStatus(200);
     }
     
-// 📋 CALLBACKS DO MENU DE AJUDA
-if (["ajuda_entrada", "ajuda_saida", "ajuda_resumo", "ajuda_ia", "ajuda_vinculo"].includes(data)) {
-  switch (data) {
-    case "ajuda_entrada":
-      await sendMessage(chatId, "💰 Envie algo como `+2000 salário` para registrar uma *entrada*.");
-      break;
-    case "ajuda_saida":
-      await sendMessage(chatId, "💸 Envie algo como `-150 mercado` para registrar uma *saída*.");
-      break;
-    case "ajuda_resumo":
-      await sendMessage(chatId, "📊 Veja seu resumo completo no app FinanceFlow, na aba *Dashboard*.");
-      break;
-    case "ajuda_ia":
-      await sendMessage(chatId, "🧠 A IA classifica automaticamente suas transações e aprende seus hábitos financeiros.");
-      break;
-    case "ajuda_vinculo":
-      await sendMessage(
-        chatId,
-        "🔗 Para vincular sua conta:\n" +
-          "1️⃣ Gere um novo token no app (Configurações → Integrações → Telegram)\n" +
-          "2️⃣ Envie aqui `/vincular TLG-XXXXXX`"
-      );
-      break;
+/* ===========================
+🗑️ CONFIRMAR EXCLUSÃO DE TRANSAÇÃO
+=========================== */
+if (data.startsWith("del_")) {
+  const [_, transacaoId] = data.split("_");
+
+  const { error } = await supabase
+    .from("transacoes")
+    .delete()
+    .eq("id", transacaoId);
+
+  if (error) {
+    console.error("❌ Erro ao excluir transação:", error);
+    await sendMessage(chatId, "⚠️ Erro ao excluir transação. Tente novamente.");
+    return res.sendStatus(200);
   }
 
-  await sendCallbackAnswer(cb.id);
+  await sendMessage(chatId, "🗑️ Última transação apagada com sucesso!");
   return res.sendStatus(200);
 }
-    // 🔚 Fallback: marca callback como respondido
-    await sendCallbackAnswer(cb.id);
+
+if (data === "cancelar_del") {
+  await sendMessage(chatId, "❌ Ação cancelada. Nenhuma transação foi excluída.");
+  return res.sendStatus(200);
+}
+    // 🔚 Fallback genérico
+    console.log("ℹ️ Callback sem ação específica:", data);
     return res.sendStatus(200);
+
   } catch (err) {
     console.error("❌ Erro ao processar callback:", err);
     try {
@@ -790,6 +837,49 @@ if (temp && temp.contexto === "corrigir_valor") {
   return res.sendStatus(200);
 }
   /* ============================================================
+🗑️ DESFAZER (APAGAR ÚLTIMA TRANSAÇÃO)
+============================================================ */
+if (text?.toLowerCase() === "/desfazer" || text?.toLowerCase() === "/apagar") {
+  const user = await buscarUsuario(chatId);
+  if (!user) {
+    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+    return res.sendStatus(200);
+  }
+
+  const { data: ultima, error } = await supabase
+    .from("transacoes")
+    .select("id, descricao, valor, tipo, created_at")
+    .eq("user_id", user.user_id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !ultima) {
+    await sendMessage(chatId, "📭 Nenhuma transação recente encontrada.");
+    return res.sendStatus(200);
+  }
+
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: "✅ Sim, excluir", callback_data: `del_${ultima.id}` },
+        { text: "❌ Cancelar", callback_data: "cancelar_del" },
+      ],
+    ],
+  };
+
+  await sendMessage(
+    chatId,
+    `Tem certeza que deseja apagar a última transação?\n\n` +
+      `${ultima.tipo === "entrada" ? "💰" : "💸"} *${ultima.descricao}* — R$${ultima.valor}\n` +
+      `(${new Date(ultima.created_at).toLocaleString("pt-BR")})`,
+    replyMarkup
+  );
+
+  return res.sendStatus(200);
+}
+  
+  /* ============================================================
   🧩 REGISTRO DE TEXTO (IA e transações)
   ============================================================ */
   const user = await buscarUsuario(chatId);
@@ -828,8 +918,48 @@ if (temp && temp.contexto === "corrigir_valor") {
       await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
   }
 
-  res.sendStatus(200);
-});
+  default:
+  const comando = text?.toLowerCase().trim();
+
+  // 🗑️ Ações manuais de desfazer / apagar
+  if (["desfazer", "apagar", "excluir", "apagar última", "excluir última"].includes(comando)) {
+    const { data: ultima, error } = await supabase
+      .from("transacoes")
+      .select("id, descricao, valor, tipo, created_at")
+      .eq("user_id", user_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !ultima) {
+      await sendMessage(chatId, "📭 Nenhuma transação recente encontrada.");
+      return res.sendStatus(200);
+    }
+
+    const replyMarkup = {
+      inline_keyboard: [
+        [
+          { text: "✅ Sim, excluir", callback_data: `del_${ultima.id}` },
+          { text: "❌ Cancelar", callback_data: "cancelar_del" },
+        ],
+      ],
+    };
+
+    await sendMessage(
+      chatId,
+      `Tem certeza que deseja apagar a última transação?\n\n` +
+        `${ultima.tipo === "entrada" ? "💰" : "💸"} *${ultima.descricao}* — R$${ultima.valor}\n` +
+        `(${new Date(ultima.created_at).toLocaleString("pt-BR")})`,
+      replyMarkup
+    );
+
+    return res.sendStatus(200);
+  }
+
+  // 🔚 Caso não seja "desfazer" nem "apagar"
+  await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
+
+
 /* ============================================================
 🔁 SUPABASE REALTIME ↔ TELEGRAM ↔ FRONT (sem duplicação)
 ============================================================ */
