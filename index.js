@@ -157,7 +157,7 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
       categoria: null,
       essencial: null,
       user_id: userId,
-      family_id: familyId || null,
+      family_id: familyId ?? userId, // ✅ fallback seguro: se não houver family_id, usa o próprio userId
       chat_id: chatId.toString(),
     })
     .select("id, tipo")
