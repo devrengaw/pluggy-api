@@ -754,8 +754,8 @@ if (data === "cancelar_del") {
     return res.sendStatus(200);
   }
   
-  /* ============================================================
-🔑 VINCULAÇÃO VIA TOKEN TELEGRAM
+/* ============================================================
+🔑 VINCULAÇÃO VIA TOKEN TELEGRAM — versão corrigida
 ============================================================ */
 if (text.toLowerCase().startsWith("/vincular")) {
   const parts = text.split(" ");
@@ -778,14 +778,18 @@ if (text.toLowerCase().startsWith("/vincular")) {
     return res.sendStatus(200);
   }
 
+  // 🚨 Antes de vincular, remove qualquer vínculo existente com o mesmo chat_id
+  await supabase.from("telegram_users").delete().eq("chat_id", chatId.toString());
+
   // ✅ Vincula conta
-  const { error: upsertError } = await supabase.from("telegram_users").upsert({
+  const { error: upsertError } = await supabase.from("telegram_users").insert({
     chat_id: chatId.toString(),
     user_id: tokenData.user_id,
-    family_id: tokenData.family_id,
+    family_id: tokenData.family_id || null,
     perguntar_essencial: true,
     conectado: true,
     atualizado_em: new Date(),
+    criado_em: new Date(),
   });
 
   if (upsertError) {
@@ -800,7 +804,7 @@ if (text.toLowerCase().startsWith("/vincular")) {
     .update({ ativo: false, usado_em: new Date() })
     .eq("id", tokenData.id);
 
-  // 🧠 Mensagem final
+  // 🧠 Confirmação ao usuário
   await sendMessage(
     chatId,
     "✅ *Conta vinculada com sucesso!*\n\n" +
@@ -813,35 +817,54 @@ if (text.toLowerCase().startsWith("/vincular")) {
 
   return res.sendStatus(200);
 }
+  /* ============================================================
+🔌 COMANDO /desvincular — remover vínculo do Telegram
+============================================================ */
+if (text?.toLowerCase() === "/desvincular") {
+  const chatIdStr = chatId.toString();
 
-// 🧩 Verifica se o usuário está corrigindo um valor
-const { data: temp } = await supabase
-  .from("telegram_temp")
-  .select("*")
-  .eq("chat_id", chatId)
-  .maybeSingle();
+  try {
+    // 🔍 Busca o vínculo atual
+    const { data: vinculo } = await supabase
+      .from("telegram_users")
+      .select("id, user_id, conectado")
+      .eq("chat_id", chatIdStr)
+      .maybeSingle();
 
-if (temp && temp.contexto === "corrigir_valor") {
-  const novoValor = parseFloat(text.replace(",", "."));
-  if (isNaN(novoValor)) {
-    await sendMessage(chatId, "⚠️ Valor inválido. Tente novamente (ex: 153.29).");
+    if (!vinculo) {
+      await sendMessage(chatId, "⚠️ Nenhuma conta vinculada a este chat.");
+      return res.sendStatus(200);
+    }
+
+    // ❌ Desvincula e marca como desconectado
+    await supabase
+      .from("telegram_users")
+      .update({
+        conectado: false,
+        atualizado_em: new Date(),
+      })
+      .eq("chat_id", chatIdStr);
+
+    // Opcional: remover o vínculo completamente
+    await supabase.from("telegram_users").delete().eq("chat_id", chatIdStr);
+
+    // 🔒 Log e retorno visual
+    console.log(`🔌 Conta desvinculada do Telegram: chat_id ${chatIdStr}`);
+    await sendMessage(
+      chatId,
+      "🔓 Sua conta foi *desvinculada com sucesso!*.\n\n" +
+        "Se quiser conectar novamente, gere um novo token no app e envie:\n" +
+        "`/vincular TLG-XXXXXX`"
+    );
+
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Erro ao desvincular conta:", err);
+    await sendMessage(chatId, "⚠️ Ocorreu um erro ao tentar desvincular. Tente novamente.");
     return res.sendStatus(200);
   }
-
-  await registrarTransacao({
-    tipo: "saida",
-    valor: novoValor,
-    descricao: temp.descricao,
-    chatId,
-    userId: user.user_id,
-    familyId: user.family_id,
-    perguntarEssencial: user.perguntar_essencial,
-  });
-
-  await supabase.from("telegram_temp").delete().eq("chat_id", chatId);
-  await sendMessage(chatId, "💸 Saída registrada com o valor corrigido!");
-  return res.sendStatus(200);
 }
+  
   /* ============================================================
 🗑️ DESFAZER (APAGAR ÚLTIMA TRANSAÇÃO)
 ============================================================ */
