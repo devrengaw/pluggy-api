@@ -987,7 +987,9 @@ if (text?.toLowerCase() === "/desfazer" || text?.toLowerCase() === "/apagar") {
 
   // 🔚 Caso não seja "desfazer" nem "apagar"
   await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
-
+  
+  return res.sendStatus(200);
+}); // ✅ fecha o app.post(`/webhook/${TELEGRAM_TOKEN}`)
 
 /* ============================================================
 🔁 SUPABASE REALTIME ↔ TELEGRAM ↔ FRONT (sem duplicação)
