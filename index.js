@@ -39,26 +39,53 @@ async function sendMessage(chatId, text, reply_markup = null) {
 }
 
 async function sendCallbackAnswer(callbackQueryId, text = "OK") {
-  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
-  });
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    });
+  } catch (e) {
+    console.error("⚠️ Erro ao responder callback:", e);
+  }
 }
 
 async function buscarUsuario(chatId) {
+  const chatIdStr = chatId.toString(); // ✅ garantir tipo
   const { data } = await supabase
     .from("telegram_users")
     .select("user_id, family_id, perguntar_essencial")
-    .eq("chat_id", chatId)
+    .eq("chat_id", chatIdStr)
     .maybeSingle();
   return data || null;
 }
 
 /* ============================================================
-🧠 INTERPRETAÇÃO NATURAL (IA)
+🧠 INTERPRETAÇÃO NATURAL (IA) + FALLBACK LOCAL
 ============================================================ */
+
+// Fallback local para comandos do tipo: +500 mercado / -120 gasolina
+function interpretarLocal(text) {
+  const m = text.trim().match(/^([+\-])\s*([\d,.]+)\s*(.+)?$/);
+  if (!m) return null;
+  const sinal = m[1];
+  const valorStr = m[2].replace(".", "").replace(",", ".");
+  const valor = Number(valorStr);
+  if (Number.isNaN(valor)) return null;
+  const descricao = (m[3] || "").trim() || (sinal === "+" ? "Entrada" : "Saída");
+  return {
+    acao: sinal === "+" ? "entrada" : "saida",
+    valor,
+    descricao,
+  };
+}
+
 async function interpretarMensagem(text) {
+  // 1) tenta parser local simples
+  const local = interpretarLocal(text);
+  if (local) return local;
+
+  // 2) cai para IA (mantendo sua estrutura original)
   const prompt = `
 Você é um assistente financeiro.
 Classifique o texto como "entrada", "saida", "consulta", "menu", "saldo", "resumo", "extrato", "projecao" ou "outros".
@@ -146,7 +173,6 @@ function detectarTipoFixo(descricao) {
 async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
   const tipo_fixo = detectarTipoFixo(descricao);
 
-  // 1️⃣ Cria a transação e garante que o ID é retornado
   const { data: insertData, error } = await supabase
     .from("transacoes")
     .insert({
@@ -157,32 +183,49 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
       categoria: null,
       essencial: null,
       user_id: userId,
-      family_id: familyId ?? userId, // ✅ fallback seguro: se não houver family_id, usa o próprio userId
+      family_id: familyId ?? userId, // ✅ fallback seguro para não ficar null
       chat_id: chatId.toString(),
     })
     .select("id, tipo")
     .maybeSingle();
 
   if (error || !insertData) {
-    console.error("❌ Erro ao registrar:", error);
-    return await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
+    console.error("❌ Erro ao registrar transação:", error);
+    await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
+    return;
   }
 
   const transactionId = insertData.id;
-  console.log("🧾 Transação criada com ID:", transactionId);
-
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
-  await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
+  await sendMessage(chatId, `${label}: R$${Number(valor).toFixed(2)} — ${descricao}`);
 
-  // 2️⃣ Busca categorias somente depois que a transação foi confirmada
-  const { data: categorias } = await supabase
-    .from("categorias")
-    .select("nome")
-    .or(`user_id.eq.${userId},padrao.eq.true`)
-    .order("nome", { ascending: true });
+  // 🔎 Busca categorias (resiliente)
+  let categorias = [];
+  try {
+    const query = supabase.from("categorias").select("nome").order("nome", { ascending: true });
 
-  // 3️⃣ Cria menu de categorias (somente se houver categorias e ID válido)
-  if (categorias?.length && transactionId) {
+    // tenta user_id + padrao (se existir)
+    const { data: cat1, error: e1 } = await supabase
+      .from("categorias")
+      .select("nome, padrao, user_id")
+      .or(`user_id.eq.${userId},padrao.eq.true`)
+      .order("nome", { ascending: true });
+
+    if (e1) {
+      console.warn("⚠️ categorias: falha em or(user_id,padrao). Tentando somente user_id…", e1.message);
+      const { data: cat2, error: e2 } = await query.eq("user_id", userId);
+      if (e2) console.error("❌ categorias: erro ao buscar por user_id:", e2.message);
+      categorias = cat2 || [];
+    } else {
+      categorias = cat1 || [];
+    }
+  } catch (e) {
+    console.error("❌ Erro inesperado buscando categorias:", e);
+  }
+
+  if (!categorias.length) {
+    console.log("ℹ️ Nenhuma categoria encontrada para montar o teclado.");
+  } else {
     const inlineKeyboard = [];
     for (let i = 0; i < categorias.length; i += 2) {
       const linha = categorias.slice(i, i + 2).map((c) => ({
@@ -191,13 +234,9 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
       }));
       inlineKeyboard.push(linha);
     }
-
-    const replyMarkup = { inline_keyboard: inlineKeyboard };
-    await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
-    console.log("📲 Botões de categoria enviados para:", chatId);
+    await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", { inline_keyboard: inlineKeyboard });
   }
 
-  // 4️⃣ Pergunta “essencial” apenas se for SAÍDA
   if (tipo === "saida" && perguntarEssencial) {
     const replyMarkupEss = {
       inline_keyboard: [
@@ -212,51 +251,77 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
 }
 
 async function comandoSaldo(chatId, userId, familyId) {
-  // 🔎 Busca somente transações do próprio usuário OU da família dele (se existir)
-  const { data: transacoes, error: transacoesError } = await supabase
+  const filtro = familyId
+    ? `user_id.eq.${userId},family_id.eq.${familyId}`
+    : `user_id.eq.${userId}`;
+
+  const { data, error } = await supabase
     .from("transacoes")
     .select("tipo, valor")
-    .or(
-      familyId
-        ? `user_id.eq.${userId},family_id.eq.${familyId}`
-        : `user_id.eq.${userId}`
-    );
+    .or(filtro);
 
-  if (transacoesError) {
-    console.error(transacoesError);
+  if (error) {
+    console.error("❌ Erro saldo:", error);
     return await sendMessage(chatId, "⚠️ Erro ao calcular saldo.");
   }
+  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
 
-  if (!transacoes?.length)
-    return await sendMessage(chatId, "📭 Nenhuma transação encontrada.");
-
-  const total = transacoes.reduce(
-    (acc, t) => acc + (t.tipo === "entrada" ? t.valor : -t.valor),
-    0
-  );
-
+  const total = data.reduce((acc, t) => acc + (t.tipo === "entrada" ? Number(t.valor) : -Number(t.valor)), 0);
   await sendMessage(chatId, `📊 *Seu saldo atual é:* R$${total.toFixed(2)}`);
+}
+
+async function comandoResumo(chatId, userId) {
+  const { data, error } = await supabase
+    .from("transacoes")
+    .select("tipo, valor, descricao, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(5);
+  if (error) {
+    console.error("❌ Erro resumo:", error);
+    return await sendMessage(chatId, "⚠️ Erro ao gerar resumo.");
+  }
+  if (!data?.length) return await sendMessage(chatId, "📭 Nenhuma transação recente.");
+  const linhas = data
+    .map(
+      (t) =>
+        `${t.tipo === "entrada" ? "💰" : "💸"} ${t.descricao} — R$${Number(t.valor).toFixed(2)} em ${new Date(
+          t.created_at
+        ).toLocaleDateString("pt-BR")}`
+    )
+    .join("\n");
+  await sendMessage(chatId, `🧾 *Últimas transações:*\n${linhas}`);
 }
 
 /* ============================================================
 🔄 CALLBACKS (helpers)
 ============================================================ */
 async function definirCategoria(transactionId, categoria, chatId) {
-  await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
-  await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
+  try {
+    await supabase.from("transacoes").update({ categoria }).eq("id", transactionId);
+    await sendMessage(chatId, `🗂 Categoria registrada como *${categoria}*`);
+  } catch (e) {
+    console.error("❌ Erro definirCategoria:", e);
+    await sendMessage(chatId, "⚠️ Erro ao definir categoria.");
+  }
 }
 
 async function definirEssencialidade(transactionId, valor, chatId, userId) {
-  const essencial = valor === "true";
-  const { data } = await supabase
-    .from("transacoes")
-    .update({ essencial })
-    .eq("id", transactionId)
-    .select("descricao")
-    .maybeSingle();
+  try {
+    const essencial = valor === "true";
+    const { data } = await supabase
+      .from("transacoes")
+      .update({ essencial })
+      .eq("id", transactionId)
+      .select("descricao")
+      .maybeSingle();
 
-  await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
-  if (data?.descricao) await atualizarMemoriaEssencial(userId, data.descricao, essencial);
+    await sendMessage(chatId, essencial ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
+    if (data?.descricao) await atualizarMemoriaEssencial(userId, data.descricao, essencial);
+  } catch (e) {
+    console.error("❌ Erro definirEssencialidade:", e);
+    await sendMessage(chatId, "⚠️ Erro ao definir essencialidade.");
+  }
 }
 
 /* ============================================================
@@ -267,7 +332,6 @@ app.post("/gerar-token-telegram", async (req, res) => {
     const { user_id } = req.body;
     if (!user_id) return res.status(400).json({ success: false, message: "Usuário não informado" });
 
-    // Busca family_id do usuário
     const { data: user } = await supabase
       .from("users")
       .select("id, family_id")
@@ -275,10 +339,8 @@ app.post("/gerar-token-telegram", async (req, res) => {
       .maybeSingle();
     if (!user) return res.status(404).json({ success: false, message: "Usuário não encontrado" });
 
-    // Desativa tokens anteriores
     await supabase.from("telegram_tokens").update({ ativo: false }).eq("user_id", user_id);
 
-    // Gera token novo
     const token = "TLG-" + randomUUID().split("-")[0].toUpperCase();
     const { error } = await supabase.from("telegram_tokens").insert({
       token,
@@ -303,20 +365,18 @@ app.post("/ativar-teste", async (req, res) => {
   const { user_id } = req.body;
 
   try {
-    const { data: usuario, error } = await supabase
+    const { data: usuario } = await supabase
       .from("users")
       .select("plano, trial_ativo, trial_utilizado, trial_expira_em")
       .eq("id", user_id)
       .maybeSingle();
 
-    if (error || !usuario)
+    if (!usuario)
       return res.status(404).json({ success: false, message: "Usuário não encontrado." });
 
-    // ❌ Já usou o teste uma vez?
     if (usuario.trial_utilizado)
       return res.json({ success: false, message: "Você já utilizou seu teste gratuito." });
 
-    // ⏳ Já possui um teste ativo?
     if (usuario.trial_ativo && new Date(usuario.trial_expira_em) > new Date()) {
       return res.json({
         success: false,
@@ -325,14 +385,13 @@ app.post("/ativar-teste", async (req, res) => {
       });
     }
 
-    // ✅ Ativa o teste Premium
-    const expiraEm = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 dias
+    const expiraEm = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     await supabase
       .from("users")
       .update({
-        plano: "premium",          // 🔹 Durante o teste, o plano é Premium
+        plano: "premium",
         trial_ativo: true,
-        trial_utilizado: true,     // 🔹 Marca como usado
+        trial_utilizado: true,
         trial_expira_em: expiraEm,
       })
       .eq("id", user_id);
@@ -351,7 +410,6 @@ app.post("/ativar-teste", async (req, res) => {
 /* ============================================================
 💳 ENDPOINT UNIVERSAL — Registrar compra no cartão (Telegram + Web)
 ============================================================ */
-
 app.post("/registrar-compra-credito", async (req, res) => {
   try {
     const { user_id, family_id, card_id, valor, descricao, parcelas = 1 } = req.body;
@@ -363,7 +421,6 @@ app.post("/registrar-compra-credito", async (req, res) => {
       });
     }
 
-    // Busca informações do cartão
     const { data: card, error: cardError } = await supabase
       .from("cards")
       .select("*")
@@ -372,18 +429,16 @@ app.post("/registrar-compra-credito", async (req, res) => {
 
     if (cardError || !card) throw new Error("Cartão não encontrado.");
 
-    // Calcula as datas de fatura
     function calcularDataFatura(diaFechamento, offsetMes = 0) {
       const hoje = new Date();
       return new Date(hoje.getFullYear(), hoje.getMonth() + offsetMes, diaFechamento);
     }
 
-    // Cria as parcelas da compra
     for (let i = 1; i <= parcelas; i++) {
       const dataFatura = calcularDataFatura(card.dia_fechamento, i - 1);
       const { error: txError } = await supabase.from("transacoes").insert({
         tipo: "saida",
-        valor: valor / parcelas,
+        valor: Number(valor) / parcelas,
         descricao,
         card_id: card.id,
         user_id,
@@ -397,16 +452,15 @@ app.post("/registrar-compra-credito", async (req, res) => {
       if (txError) throw txError;
     }
 
-    // Atualiza saldo do cartão
     const { error: saldoError } = await supabase.rpc("atualizar_saldo_cartao", {
       p_card_id: card.id,
-      p_valor: valor,
+      p_valor: Number(valor),
     });
     if (saldoError) throw saldoError;
 
     return res.json({
       success: true,
-      message: `💳 Compra registrada: ${descricao} — R$${valor.toFixed(
+      message: `💳 Compra registrada: ${descricao} — R$${Number(valor).toFixed(
         2
       )} (${parcelas}x no cartão ${card.apelido})`,
     });
@@ -426,47 +480,146 @@ app.post("/registrar-compra-credito", async (req, res) => {
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const body = req.body;
   const msg = body.message;
-  if (!msg) return res.sendStatus(200);
+  if (!msg && !body.callback_query) return res.sendStatus(200);
 
-  const chatId = msg.chat.id;
-  const text = msg.text?.trim();
-  
-/* ============================================================
-📸 DETECTA ENVIO DE FOTO (nota fiscal ou recibo)
-============================================================ */
-  
-if (msg.photo && msg.photo.length > 0) {
-  try {
-    // 🧩 Importa Tesseract dinamicamente (compatível com ESM + Render)
-    const pkgTesseract = await import("tesseract.js");
-    const { createWorker } = pkgTesseract;
+  // ==============================
+  // CALLBACKS (botões)
+  // ==============================
+  if (body.callback_query) {
+    const cb = body.callback_query;
+    const chatId = cb.message.chat.id;
+    const data = cb.data;
+    const user = await buscarUsuario(chatId);
+    const userId = user?.user_id;
 
-    const fileId = msg.photo[msg.photo.length - 1].file_id;
-    const tgResp = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`
-    );
-    const fileInfo = await tgResp.json();
+    console.log("🧩 Callback recebido:", data);
+    await sendCallbackAnswer(cb.id, "Processando..."); // ✅ responde rápido ao Telegram
 
-    if (!fileInfo?.ok) {
-      await sendMessage(chatId, "⚠️ Erro ao baixar imagem. Tente novamente.");
+    try {
+      // ✅ CONFIRMAR FOTO
+      if (data.startsWith("conf_foto_")) {
+        const [_, valor, ...descParts] = data.split("_");
+        const descricao = decodeURIComponent(descParts.join("_"));
+        if (!user) {
+          await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+          return res.sendStatus(200);
+        }
+
+        await registrarTransacao({
+          tipo: "saida",
+          valor,
+          descricao,
+          chatId,
+          userId: user.user_id,
+          familyId: user.family_id,
+          perguntarEssencial: user.perguntar_essencial,
+        });
+
+        await sendMessage(chatId, "💸 Saída registrada com sucesso!");
+        return res.sendStatus(200);
+      }
+
+      // ✏️ CORRIGIR VALOR
+      if (data.startsWith("corrigir_")) {
+        const descricao = decodeURIComponent(data.replace("corrigir_", ""));
+        await sendMessage(chatId, `✏️ Digite o valor correto para *${descricao}* (ex: 152.35):`);
+
+        await supabase.from("telegram_temp").upsert({
+          chat_id: chatId.toString(),
+          contexto: "corrigir_valor",
+          descricao,
+          atualizado_em: new Date(),
+        });
+
+        return res.sendStatus(200);
+      }
+
+      // ❌ CANCELAR
+      if (data === "cancelar_foto") {
+        await sendMessage(chatId, "❌ Registro cancelado.");
+        return res.sendStatus(200);
+      }
+
+      // 🗂 CATEGORIA
+      if (data.startsWith("cat_")) {
+        const [_, transacaoId, ...categoriaParts] = data.split("_");
+        const categoria = decodeURIComponent(categoriaParts.join("_"));
+        await definirCategoria(transacaoId, categoria, chatId);
+        await sendMessage(chatId, `✅ Categoria *${categoria}* aplicada com sucesso!`);
+        return res.sendStatus(200);
+      }
+
+      // ⚙️ ESSENCIALIDADE
+      if (data.startsWith("ess_")) {
+        const [_, transacaoId, valor] = data.split("_");
+        await definirEssencialidade(transacaoId, valor, chatId, userId);
+        await sendMessage(chatId, valor === "true" ? "🟢 Marcado como *essencial*" : "🔴 Marcado como *não essencial*");
+        return res.sendStatus(200);
+      }
+
+      // 🗑️ CONFIRMAR EXCLUSÃO DE TRANSAÇÃO
+      if (data.startsWith("del_")) {
+        const [_, transacaoId] = data.split("_");
+        const { error } = await supabase.from("transacoes").delete().eq("id", transacaoId);
+        if (error) {
+          console.error("❌ Erro ao excluir transação:", error);
+          await sendMessage(chatId, "⚠️ Erro ao excluir transação. Tente novamente.");
+          return res.sendStatus(200);
+        }
+        await sendMessage(chatId, "🗑️ Última transação apagada com sucesso!");
+        return res.sendStatus(200);
+      }
+
+      if (data === "cancelar_del") {
+        await sendMessage(chatId, "❌ Ação cancelada. Nenhuma transação foi excluída.");
+        return res.sendStatus(200);
+      }
+
+      console.log("ℹ️ Callback sem ação específica:", data);
+      return res.sendStatus(200);
+    } catch (err) {
+      console.error("❌ Erro ao processar callback:", err);
+      try { await sendCallbackAnswer(cb.id, "Erro ao processar ação"); } catch {}
       return res.sendStatus(200);
     }
+  }
 
-    const filePath = fileInfo.result.file_path;
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+  // ==============================
+  // MENSAGENS
+  // ==============================
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim();
 
-    await sendMessage(chatId, "🧾 Recebido! Estou lendo sua nota fiscal...");
+  // 📸 FOTO (nota fiscal)
+  if (msg.photo && msg.photo.length > 0) {
+    try {
+      const pkgTesseract = await import("tesseract.js");
+      const { createWorker } = pkgTesseract;
 
-    // 🔠 OCR: extrai texto da imagem
-    const worker = await createWorker("por"); // idioma português
-    const { data: ocrResult } = await worker.recognize(fileUrl);
-    await worker.terminate();
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      const tgResp = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`
+      );
+      const fileInfo = await tgResp.json();
 
-    const textoExtraido = ocrResult.text;
-    console.log("🧠 Texto OCR extraído:", textoExtraido.slice(0, 300));
+      if (!fileInfo?.ok) {
+        await sendMessage(chatId, "⚠️ Erro ao baixar imagem. Tente novamente.");
+        return res.sendStatus(200);
+      }
 
-    // 🧠 Envia texto para IA interpretar
-    const prompt = `
+      const filePath = fileInfo.result.file_path;
+      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+
+      await sendMessage(chatId, "🧾 Recebido! Estou lendo sua nota fiscal...");
+
+      const worker = await createWorker("por");
+      const { data: ocrResult } = await worker.recognize(fileUrl);
+      await worker.terminate();
+
+      const textoExtraido = ocrResult.text;
+      console.log("🧠 Texto OCR extraído:", textoExtraido.slice(0, 300));
+
+      const prompt = `
 Você é um assistente financeiro.
 Analise o texto de uma nota fiscal abaixo e extraia:
 - O valor total da compra (ex: 153.29)
@@ -484,235 +637,65 @@ ${textoExtraido}
 """
 `;
 
-    const aiResult = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-    });
+      const aiResult = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.2,
+      });
 
-    const raw = aiResult.choices[0].message.content.trim();
-    const match = raw.match(/\{[\s\S]*\}/);
-    const dataExtraida = match ? JSON.parse(match[0]) : null;
+      const raw = aiResult.choices[0].message.content.trim();
+      const match = raw.match(/\{[\s\S]*\}/);
+      const dataExtraida = match ? JSON.parse(match[0]) : null;
 
-    if (!dataExtraida?.valor) {
-      await sendMessage(chatId, "⚠️ Não consegui identificar o valor total. Envie uma imagem mais nítida.");
-      return res.sendStatus(200);
-    }
-
-   // 💬 Confirmação antes de registrar (com opção de correção)
-const descricaoSafe = encodeURIComponent(dataExtraida.descricao || "Compra");
-
-const replyMarkup = {
-  inline_keyboard: [
-    [
-      { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${descricaoSafe}` },
-      { text: "✏️ Corrigir valor", callback_data: `corrigir_${descricaoSafe}` },
-      { text: "❌ Cancelar", callback_data: "cancelar_foto" },
-    ],
-  ],
-};
-
-await sendMessage(
-  chatId,
-  `Detectei *R$${dataExtraida.valor}* em *${dataExtraida.descricao}*.\nDeseja registrar essa compra como saída?`,
-  replyMarkup
-);
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Erro OCR+IA:", err);
-    await sendMessage(chatId, "⚠️ Ocorreu um erro ao analisar a nota. Tente novamente.");
-    return res.sendStatus(200);
-  }
-}
-  
-/* ============================================================
-🎛 CALLBACKS (categorias, essencial, confirmações e corrigir)
-============================================================ */
-if (body.callback_query) {
-  const cb = body.callback_query;
-  const chatId = cb.message.chat.id;
-  const data = cb.data;
-  const user = await buscarUsuario(chatId);
-  const userId = user?.user_id;
-
-  console.log("🧩 Callback recebido:", data);
-
-  try {
-    // ⚡ responde imediatamente ao Telegram
-    await sendCallbackAnswer(cb.id, "Processando...");
-
-    /* ===========================
-    ✅ CONFIRMAR FOTO
-    =========================== */
-    if (data.startsWith("conf_foto_")) {
-      const [_, valor, ...descParts] = data.split("_");
-      const descricao = decodeURIComponent(descParts.join("_"));
-      if (!user) {
-        await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+      if (!dataExtraida?.valor) {
+        await sendMessage(chatId, "⚠️ Não consegui identificar o valor total. Envie uma imagem mais nítida.");
         return res.sendStatus(200);
       }
 
-      await registrarTransacao({
-        tipo: "saida",
-        valor,
-        descricao,
-        chatId,
-        userId: user.user_id,
-        familyId: user.family_id,
-        perguntarEssencial: user.perguntar_essencial,
-      });
+      const descricaoSafe = encodeURIComponent(dataExtraida.descricao || "Compra");
 
-      await sendMessage(chatId, "💸 Saída registrada com sucesso!");
-      return res.sendStatus(200);
-    }
+      const replyMarkup = {
+        inline_keyboard: [
+          [
+            { text: "✅ Confirmar", callback_data: `conf_foto_${dataExtraida.valor}_${descricaoSafe}` },
+            { text: "✏️ Corrigir valor", callback_data: `corrigir_${descricaoSafe}` },
+            { text: "❌ Cancelar", callback_data: "cancelar_foto" },
+          ],
+        ],
+      };
 
-    /* ===========================
-    ✏️ CORRIGIR VALOR
-    =========================== */
-    if (data.startsWith("corrigir_")) {
-      const descricao = decodeURIComponent(data.replace("corrigir_", ""));
       await sendMessage(
         chatId,
-        `✏️ Digite o valor correto para *${descricao}* (ex: 152.35):`
+        `Detectei *R$${Number(dataExtraida.valor).toFixed(2)}* em *${dataExtraida.descricao}*.\nDeseja registrar essa compra como saída?`,
+        replyMarkup
       );
 
-      await supabase.from("telegram_temp").upsert({
-        chat_id: chatId.toString(),
-        contexto: "corrigir_valor",
-        descricao,
-        atualizado_em: new Date(),
-      });
-
+      return res.sendStatus(200);
+    } catch (err) {
+      console.error("❌ Erro OCR+IA:", err);
+      await sendMessage(chatId, "⚠️ Ocorreu um erro ao analisar a nota. Tente novamente.");
       return res.sendStatus(200);
     }
-
-    /* ===========================
-    ❌ CANCELAR
-    =========================== */
-    if (data === "cancelar_foto") {
-      await sendMessage(chatId, "❌ Registro cancelado.");
-      return res.sendStatus(200);
-    }
-
-    /* ===========================
-    🗂 CATEGORIA
-    =========================== */
-    if (data.startsWith("cat_")) {
-      // categoria pode conter underscore — por isso fazemos join
-      const [_, transacaoId, ...categoriaParts] = data.split("_");
-      const categoria = categoriaParts.join("_");
-
-      await definirCategoria(transacaoId, categoria, chatId);
-      await sendMessage(chatId, `✅ Categoria *${categoria}* aplicada com sucesso!`);
-      return res.sendStatus(200);
-    }
-
-    /* ===========================
-    ⚙️ ESSENCIALIDADE
-    =========================== */
-    if (data.startsWith("ess_")) {
-      const [_, transacaoId, valor] = data.split("_");
-      await definirEssencialidade(transacaoId, valor, chatId, userId);
-      await sendMessage(
-        chatId,
-        valor === "true"
-          ? "🟢 Marcado como *essencial*"
-          : "🔴 Marcado como *não essencial*"
-      );
-      return res.sendStatus(200);
-    }
-
-    /* ===========================
-    📋 CALLBACKS DO MENU DE AJUDA
-    =========================== */
-    if (
-      ["ajuda_entrada", "ajuda_saida", "ajuda_resumo", "ajuda_ia", "ajuda_vinculo"].includes(data)
-    ) {
-      switch (data) {
-        case "ajuda_entrada":
-          await sendMessage(chatId, "💰 Envie algo como `+2000 salário` para registrar uma *entrada*.");
-          break;
-        case "ajuda_saida":
-          await sendMessage(chatId, "💸 Envie algo como `-150 mercado` para registrar uma *saída*.");
-          break;
-        case "ajuda_resumo":
-          await sendMessage(chatId, "📊 Veja seu resumo completo no app FinanceFlow, na aba *Dashboard*.");
-          break;
-        case "ajuda_ia":
-          await sendMessage(chatId, "🧠 A IA classifica automaticamente suas transações e aprende seus hábitos financeiros.");
-          break;
-        case "ajuda_vinculo":
-          await sendMessage(
-            chatId,
-            "🔗 Para vincular sua conta:\n" +
-              "1️⃣ Gere um novo token no app (Configurações → Integrações → Telegram)\n" +
-              "2️⃣ Envie aqui `/vincular TLG-XXXXXX`"
-          );
-          break;
-      }
-
-      return res.sendStatus(200);
-    }
-    
-/* ===========================
-🗑️ CONFIRMAR EXCLUSÃO DE TRANSAÇÃO
-=========================== */
-if (data.startsWith("del_")) {
-  const [_, transacaoId] = data.split("_");
-
-  const { error } = await supabase
-    .from("transacoes")
-    .delete()
-    .eq("id", transacaoId);
-
-  if (error) {
-    console.error("❌ Erro ao excluir transação:", error);
-    await sendMessage(chatId, "⚠️ Erro ao excluir transação. Tente novamente.");
-    return res.sendStatus(200);
   }
 
-  await sendMessage(chatId, "🗑️ Última transação apagada com sucesso!");
-  return res.sendStatus(200);
-}
-
-if (data === "cancelar_del") {
-  await sendMessage(chatId, "❌ Ação cancelada. Nenhuma transação foi excluída.");
-  return res.sendStatus(200);
-}
-    // 🔚 Fallback genérico
-    console.log("ℹ️ Callback sem ação específica:", data);
-    return res.sendStatus(200);
-
-  } catch (err) {
-    console.error("❌ Erro ao processar callback:", err);
-    try {
-      await sendCallbackAnswer(cb.id, "Erro ao processar ação");
-    } catch {}
-    return res.sendStatus(200);
-  }
-}
-  
-  /* ============================================================
-  💬 COMANDOS DE TEXTO (/start, /menu, /help)
-  ============================================================ */
+  // Comandos básicos
   if (text?.toLowerCase() === "/start") {
-  await sendMessage(
-    chatId,
-    "👋 *Bem-vindo(a) ao FinanceFlow!*\n\n" +
-      "💡 Aqui você pode registrar seus *ganhos* e *gastos* diretamente pelo Telegram, e tudo será sincronizado automaticamente com o app.\n\n" +
-      "🪄 *Antes de começar*, é preciso vincular sua conta:\n" +
-      "1️⃣ No app FinanceFlow, vá em *Configurações → Integrações → Telegram*.\n" +
-      "2️⃣ Toque em *Gerar novo token*.\n" +
-      "3️⃣ Copie o código gerado (ex: `TLG-AB12CD`).\n" +
-      "4️⃣ Volte aqui e envie:\n`/vincular TLG-AB12CD`\n\n" +
-      "✨ Depois disso, você já pode enviar mensagens como:\n" +
-      "`+2500 salário`\n" +
-      "`-150 mercado`\n\n" +
-      "Use /menu para ver as funções disponíveis ou /help para ajuda detalhada."
-  );
-  return res.sendStatus(200);
-}
+    await sendMessage(
+      chatId,
+      "👋 *Bem-vindo(a) ao FinanceFlow!*\n\n" +
+        "💡 Aqui você pode registrar seus *ganhos* e *gastos* diretamente pelo Telegram, e tudo será sincronizado automaticamente com o app.\n\n" +
+        "🪄 *Antes de começar*, é preciso vincular sua conta:\n" +
+        "1️⃣ No app FinanceFlow, vá em *Configurações → Integrações → Telegram*.\n" +
+        "2️⃣ Toque em *Gerar novo token*.\n" +
+        "3️⃣ Copie o código gerado (ex: `TLG-AB12CD`).\n" +
+        "4️⃣ Volte aqui e envie:\n`/vincular TLG-AB12CD`\n\n" +
+        "✨ Depois disso, você já pode enviar mensagens como:\n" +
+        "`+2500 salário`\n" +
+        "`-150 mercado`\n\n" +
+        "Use /menu para ver as funções disponíveis ou /help para ajuda detalhada."
+    );
+    return res.sendStatus(200);
+  }
 
   if (text?.toLowerCase() === "/menu") {
     const replyMarkup = {
@@ -737,171 +720,155 @@ if (data === "cancelar_del") {
       chatId,
       "*📖 Guia FinanceFlow — Ajuda Rápida*\n\n" +
         "💰 Registrar transações: `+2500 salário` ou `-150 mercado`\n" +
-        "🧠 IA classifica automaticamente suas transações.\n" +
+        "🧠 IA classifica automaticamente suas transações (com fallback local para + e - ).\n" +
         "👨‍👩‍👧 Hub Familiar: compartilhe o dashboard com sua família.\n" +
         "🔗 /menu — ver comandos\n/start — boas-vindas\n/help — este guia."
     );
     return res.sendStatus(200);
   }
-  
-/* ============================================================
-🔑 VINCULAÇÃO VIA TOKEN TELEGRAM — versão corrigida
-============================================================ */
-if (text.toLowerCase().startsWith("/vincular")) {
-  const parts = text.split(" ");
-  const token = parts[1]?.trim();
 
-  if (!token || !token.startsWith("TLG-")) {
-    await sendMessage(chatId, "❌ Formato inválido. Envie assim:\n`/vincular TLG-XXXXXX`");
-    return res.sendStatus(200);
-  }
+  // Vinculação via token
+  if (text?.toLowerCase().startsWith("/vincular")) {
+    const parts = text.split(" ");
+    const token = parts[1]?.trim();
 
-  // 🔍 Busca token ativo
-  const { data: tokenData, error: tokenError } = await supabase
-    .from("telegram_tokens")
-    .select("id, user_id, family_id, ativo")
-    .eq("token", token)
-    .maybeSingle();
-
-  if (tokenError || !tokenData || !tokenData.ativo) {
-    await sendMessage(chatId, "⚠️ Token inválido ou expirado. Gere um novo no app FinanceFlow.");
-    return res.sendStatus(200);
-  }
-
-  // 🚨 Antes de vincular, remove qualquer vínculo existente com o mesmo chat_id
-  await supabase.from("telegram_users").delete().eq("chat_id", chatId.toString());
-
- // 🧩 Garante que o family_id esteja atualizado
-let familyId = tokenData.family_id;
-if (!familyId) {
-  const { data: userData } = await supabase
-    .from("users")
-    .select("family_id")
-    .eq("id", tokenData.user_id)
-    .maybeSingle();
-  familyId = userData?.family_id || null;
-}
-
-// ✅ Vincula conta com o family_id garantido
-const { error: upsertError } = await supabase.from("telegram_users").insert({
-  chat_id: chatId.toString(),
-  user_id: tokenData.user_id,
-  family_id: familyId, // ← aqui é o ponto chave
-  perguntar_essencial: true,
-  conectado: true,
-  atualizado_em: new Date(),
-  criado_em: new Date(),
-});
-  if (upsertError) {
-    console.error("❌ Erro ao vincular Telegram:", upsertError);
-    await sendMessage(chatId, "⚠️ Erro ao vincular conta. Tente novamente.");
-    return res.sendStatus(200);
-  }
-
-  // 🔒 Desativa token após uso
-  await supabase
-    .from("telegram_tokens")
-    .update({ ativo: false, usado_em: new Date() })
-    .eq("id", tokenData.id);
-
-  // 🧠 Confirmação ao usuário
-  await sendMessage(
-    chatId,
-    "✅ *Conta vinculada com sucesso!*\n\n" +
-      "Agora você pode registrar suas transações diretamente por aqui:\n" +
-      "Exemplos:\n" +
-      "`+2000 salário`\n" +
-      "`-150 mercado`\n\n" +
-      "Use /menu para ver outras opções."
-  );
-
-  return res.sendStatus(200);
-}
-  /* ============================================================
-🔌 COMANDO /desvincular — remover vínculo do Telegram
-============================================================ */
-if (text?.toLowerCase() === "/desvincular") {
-  const chatIdStr = chatId.toString();
-
-  try {
-    // 🔍 Busca o vínculo atual
-    const { data: vinculo } = await supabase
-      .from("telegram_users")
-      .select("id, user_id, conectado")
-      .eq("chat_id", chatIdStr)
-      .maybeSingle();
-
-    if (!vinculo) {
-      await sendMessage(chatId, "⚠️ Nenhuma conta vinculada a este chat.");
+    if (!token || !token.startsWith("TLG-")) {
+      await sendMessage(chatId, "❌ Formato inválido. Envie assim:\n`/vincular TLG-XXXXXX`");
       return res.sendStatus(200);
     }
 
-   // 🔥 Remove completamente o vínculo
-await supabase.from("telegram_users").delete().eq("chat_id", chatIdStr);
+    const { data: tokenData } = await supabase
+      .from("telegram_tokens")
+      .select("id, user_id, family_id, ativo")
+      .eq("token", token)
+      .maybeSingle();
 
-    // 🔒 Log e retorno visual
-    console.log(`🔌 Conta desvinculada do Telegram: chat_id ${chatIdStr}`);
+    if (!tokenData || !tokenData.ativo) {
+      await sendMessage(chatId, "⚠️ Token inválido ou expirado. Gere um novo no app FinanceFlow.");
+      return res.sendStatus(200);
+    }
+
+    await supabase.from("telegram_users").delete().eq("chat_id", chatId.toString());
+
+    let familyId = tokenData.family_id;
+    if (!familyId) {
+      const { data: userData } = await supabase
+        .from("users")
+        .select("family_id")
+        .eq("id", tokenData.user_id)
+        .maybeSingle();
+      familyId = userData?.family_id || null;
+    }
+
+    const { error: upsertError } = await supabase.from("telegram_users").insert({
+      chat_id: chatId.toString(),
+      user_id: tokenData.user_id,
+      family_id: familyId,
+      perguntar_essencial: true,
+      conectado: true,
+      atualizado_em: new Date(),
+      criado_em: new Date(),
+    });
+    if (upsertError) {
+      console.error("❌ Erro ao vincular Telegram:", upsertError);
+      await sendMessage(chatId, "⚠️ Erro ao vincular conta. Tente novamente.");
+      return res.sendStatus(200);
+    }
+
+    await supabase
+      .from("telegram_tokens")
+      .update({ ativo: false, usado_em: new Date() })
+      .eq("id", tokenData.id);
+
     await sendMessage(
       chatId,
-      "🔓 Sua conta foi *desvinculada com sucesso!*.\n\n" +
-        "Se quiser conectar novamente, gere um novo token no app e envie:\n" +
-        "`/vincular TLG-XXXXXX`"
+      "✅ *Conta vinculada com sucesso!*\n\n" +
+        "Agora você pode registrar suas transações diretamente por aqui:\n" +
+        "Exemplos:\n" +
+        "`+2000 salário`\n" +
+        "`-150 mercado`\n\n" +
+        "Use /menu para ver outras opções."
     );
 
     return res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Erro ao desvincular conta:", err);
-    await sendMessage(chatId, "⚠️ Ocorreu um erro ao tentar desvincular. Tente novamente.");
-    return res.sendStatus(200);
-  }
-}
-  
-  /* ============================================================
-🗑️ DESFAZER (APAGAR ÚLTIMA TRANSAÇÃO)
-============================================================ */
-if (text?.toLowerCase() === "/desfazer" || text?.toLowerCase() === "/apagar") {
-  const user = await buscarUsuario(chatId);
-  if (!user) {
-    await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
-    return res.sendStatus(200);
   }
 
-  const { data: ultima, error } = await supabase
-    .from("transacoes")
-    .select("id, descricao, valor, tipo, created_at")
-    .eq("user_id", user.user_id)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Desvincular
+  if (text?.toLowerCase() === "/desvincular") {
+    const chatIdStr = chatId.toString();
 
-  if (error || !ultima) {
-    await sendMessage(chatId, "📭 Nenhuma transação recente encontrada.");
-    return res.sendStatus(200);
+    try {
+      const { data: vinculo } = await supabase
+        .from("telegram_users")
+        .select("id, user_id, conectado")
+        .eq("chat_id", chatIdStr)
+        .maybeSingle();
+
+      if (!vinculo) {
+        await sendMessage(chatId, "⚠️ Nenhuma conta vinculada a este chat.");
+        return res.sendStatus(200);
+      }
+
+      await supabase.from("telegram_users").delete().eq("chat_id", chatIdStr);
+
+      console.log(`🔌 Conta desvinculada do Telegram: chat_id ${chatIdStr}`);
+      await sendMessage(
+        chatId,
+        "🔓 Sua conta foi *desvinculada com sucesso!*.\n\n" +
+          "Se quiser conectar novamente, gere um novo token no app e envie:\n" +
+          "`/vincular TLG-XXXXXX`"
+      );
+
+      return res.sendStatus(200);
+    } catch (err) {
+      console.error("❌ Erro ao desvincular conta:", err);
+      await sendMessage(chatId, "⚠️ Ocorreu um erro ao tentar desvincular. Tente novamente.");
+      return res.sendStatus(200);
+    }
   }
 
-  const replyMarkup = {
-    inline_keyboard: [
-      [
-        { text: "✅ Sim, excluir", callback_data: `del_${ultima.id}` },
-        { text: "❌ Cancelar", callback_data: "cancelar_del" },
+  // Desfazer / apagar
+  if (text?.toLowerCase() === "/desfazer" || text?.toLowerCase() === "/apagar") {
+    const user = await buscarUsuario(chatId);
+    if (!user) {
+      await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+      return res.sendStatus(200);
+    }
+
+    const { data: ultima, error } = await supabase
+      .from("transacoes")
+      .select("id, descricao, valor, tipo, created_at")
+      .eq("user_id", user.user_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !ultima) {
+      await sendMessage(chatId, "📭 Nenhuma transação recente encontrada.");
+      return res.sendStatus(200);
+    }
+
+    const replyMarkup = {
+      inline_keyboard: [
+        [
+          { text: "✅ Sim, excluir", callback_data: `del_${ultima.id}` },
+          { text: "❌ Cancelar", callback_data: "cancelar_del" },
+        ],
       ],
-    ],
-  };
+    };
 
-  await sendMessage(
-    chatId,
-    `Tem certeza que deseja apagar a última transação?\n\n` +
-      `${ultima.tipo === "entrada" ? "💰" : "💸"} *${ultima.descricao}* — R$${ultima.valor}\n` +
-      `(${new Date(ultima.created_at).toLocaleString("pt-BR")})`,
-    replyMarkup
-  );
+    await sendMessage(
+      chatId,
+      `Tem certeza que deseja apagar a última transação?\n\n` +
+        `${ultima.tipo === "entrada" ? "💰" : "💸"} *${ultima.descricao}* — R$${Number(ultima.valor).toFixed(2)}\n` +
+        `(${new Date(ultima.created_at).toLocaleString("pt-BR")})`,
+      replyMarkup
+    );
 
-  return res.sendStatus(200);
-}
-  
-  /* ============================================================
-  🧩 REGISTRO DE TEXTO (IA e transações)
-  ============================================================ */
+    return res.sendStatus(200);
+  }
+
+  // Registro via IA + fallback
   const user = await buscarUsuario(chatId);
   if (!user) {
     await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`");
@@ -935,51 +902,11 @@ if (text?.toLowerCase() === "/desfazer" || text?.toLowerCase() === "/apagar") {
       await comandoResumo(chatId, user_id);
       break;
     default:
-      await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
+      await sendMessage(chatId, "💬 Não entendi. Envie algo como `+500 presente`, `-120 gasolina` ou `/menu`.");
   }
 
-  const comando = text?.toLowerCase().trim();
-
-  // 🗑️ Ações manuais de desfazer / apagar
-  if (["desfazer", "apagar", "excluir", "apagar última", "excluir última"].includes(comando)) {
-    const { data: ultima, error } = await supabase
-      .from("transacoes")
-      .select("id, descricao, valor, tipo, created_at")
-      .eq("user_id", user_id)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error || !ultima) {
-      await sendMessage(chatId, "📭 Nenhuma transação recente encontrada.");
-      return res.sendStatus(200);
-    }
-
-    const replyMarkup = {
-      inline_keyboard: [
-        [
-          { text: "✅ Sim, excluir", callback_data: `del_${ultima.id}` },
-          { text: "❌ Cancelar", callback_data: "cancelar_del" },
-        ],
-      ],
-    };
-
-    await sendMessage(
-      chatId,
-      `Tem certeza que deseja apagar a última transação?\n\n` +
-        `${ultima.tipo === "entrada" ? "💰" : "💸"} *${ultima.descricao}* — R$${ultima.valor}\n` +
-        `(${new Date(ultima.created_at).toLocaleString("pt-BR")})`,
-      replyMarkup
-    );
-
-    return res.sendStatus(200);
-  }
-
-  // 🔚 Caso não seja "desfazer" nem "apagar"
-  await sendMessage(chatId, "💬 Não entendi. Envie algo como `gastei 100 no mercado` ou `/menu`.");
-  
   return res.sendStatus(200);
-}); // ✅ fecha o app.post(`/webhook/${TELEGRAM_TOKEN}`)
+});
 
 /* ============================================================
 🔁 SUPABASE REALTIME ↔ TELEGRAM ↔ FRONT (sem duplicação)
@@ -989,10 +916,8 @@ supabaseRealtime
   .channel("transacoes_updates")
   .on("postgres_changes", { event: "*", schema: "public", table: "transacoes" }, async (payload) => {
     console.log("📡 Mudança detectada em transações:", payload.eventType, payload.new);
-    // intencionalmente sem sendMessage aqui para evitar "Nova transação" duplicado
   })
   .subscribe();
-
 
 /* ============================================================
 🔌 DESCONECTAR TELEGRAM
@@ -1052,7 +977,6 @@ app.post("/verificar-trials", async (req, res) => {
   try {
     const hoje = new Date();
 
-    // Busca usuários cujo teste expirou
     const { data: expirados } = await supabase
       .from("users")
       .select("id, plano")
@@ -1060,7 +984,6 @@ app.post("/verificar-trials", async (req, res) => {
       .lte("trial_expira_em", hoje.toISOString());
 
     for (const usr of expirados || []) {
-      // Regride automaticamente para plano Starter
       await supabase
         .from("users")
         .update({ trial_ativo: false, plano: "starter" })
