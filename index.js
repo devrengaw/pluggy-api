@@ -145,7 +145,9 @@ function detectarTipoFixo(descricao) {
 ============================================================ */
 async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
   const tipo_fixo = detectarTipoFixo(descricao);
-  const { data, error } = await supabase
+
+  // 1️⃣ Cria a transação e garante que o ID é retornado
+  const { data: insertData, error } = await supabase
     .from("transacoes")
     .insert({
       tipo,
@@ -161,43 +163,47 @@ async function registrarTransacao({ tipo, valor, descricao, chatId, userId, fami
     .select("id, tipo")
     .maybeSingle();
 
-  if (error) {
-    console.error("Erro ao registrar:", error);
+  if (error || !insertData) {
+    console.error("❌ Erro ao registrar:", error);
     return await sendMessage(chatId, "⚠️ Erro ao registrar transação.");
   }
+
+  const transactionId = insertData.id;
+  console.log("🧾 Transação criada com ID:", transactionId);
 
   const label = tipo === "entrada" ? "💰 Entrada registrada" : "💸 Saída registrada";
   await sendMessage(chatId, `${label}: R$${valor} — ${descricao}`);
 
-  // 🗂 Categoria // 🗂 Buscar categorias do Supabase
-  
-const { data: categorias } = await supabase
-  .from("categorias")
-  .select("nome")
-  .or(`user_id.eq.${userId},padrao.eq.true`)
-  .order("nome", { ascending: true });
+  // 2️⃣ Busca categorias somente depois que a transação foi confirmada
+  const { data: categorias } = await supabase
+    .from("categorias")
+    .select("nome")
+    .or(`user_id.eq.${userId},padrao.eq.true`)
+    .order("nome", { ascending: true });
 
-// 🗂 Criar menu dinâmico
-if (categorias?.length) {
-  const inlineKeyboard = [];
-  for (let i = 0; i < categorias.length; i += 2) {
-    const linha = categorias.slice(i, i + 2).map((c) => ({
-      text: c.nome,
-      callback_data: `cat_${data.id}_${c.nome}`,
-    }));
-    inlineKeyboard.push(linha);
+  // 3️⃣ Cria menu de categorias (somente se houver categorias e ID válido)
+  if (categorias?.length && transactionId) {
+    const inlineKeyboard = [];
+    for (let i = 0; i < categorias.length; i += 2) {
+      const linha = categorias.slice(i, i + 2).map((c) => ({
+        text: c.nome,
+        callback_data: `cat_${transactionId}_${encodeURIComponent(c.nome)}`,
+      }));
+      inlineKeyboard.push(linha);
+    }
+
+    const replyMarkup = { inline_keyboard: inlineKeyboard };
+    await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
+    console.log("📲 Botões de categoria enviados para:", chatId);
   }
-  const replyMarkup = { inline_keyboard: inlineKeyboard };
-  await sendMessage(chatId, "🗂 Escolha uma categoria para essa transação:", replyMarkup);
-}
 
-  // 🧠 Pergunta “essencial” apenas se for SAÍDA
+  // 4️⃣ Pergunta “essencial” apenas se for SAÍDA
   if (tipo === "saida" && perguntarEssencial) {
     const replyMarkupEss = {
       inline_keyboard: [
         [
-          { text: "🟢 Essencial", callback_data: `ess_${data.id}_true` },
-          { text: "🔴 Não essencial", callback_data: `ess_${data.id}_false` },
+          { text: "🟢 Essencial", callback_data: `ess_${transactionId}_true` },
+          { text: "🔴 Não essencial", callback_data: `ess_${transactionId}_false` },
         ],
       ],
     };
