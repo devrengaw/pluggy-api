@@ -203,7 +203,6 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
     const filePath = req.file.path;
     let fileContent = "";
     
-  try {
     // 🧩 1️⃣ Ler o conteúdo do arquivo
     if (req.file.mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
