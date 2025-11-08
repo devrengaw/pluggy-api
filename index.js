@@ -277,25 +277,6 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
 });
 
 /* ============================================================
-📦 UPLOAD DE EXTRATO + LEITURA IA + CLASSIFICAÇÃO AUTOMÁTICA
-============================================================ */
-
-let fileContent = "";
-
-
-} else if (
-  req.file.mimetype === "application/vnd.ms-excel" ||
-  req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-) {
-  const workbook = XLSX.readFile(filePath);
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_csv(sheet);
-  fileContent = rows;
-} else {
-  fileContent = fs.readFileSync(filePath, "utf8");
-}
-
-/* ============================================================
 💰 TRANSAÇÕES E RELATÓRIOS
 ============================================================ */
 async function registrarTransacao({ tipo, valor, descricao, chatId, userId, familyId, perguntarEssencial }) {
