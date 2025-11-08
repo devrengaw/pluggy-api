@@ -193,133 +193,116 @@ async function classificarTransacao(descricao, valor) {
 /* ============================================================
 📤 PROCESSAR EXTRATO (IA + SUPABASE)
 ============================================================ */
-app.post("/processar-extrato", (req, res, next) => {
-  // Middleware multer manual para poder debugar
-  const singleUpload = upload.single("file");
+app.post("/processar-extrato", upload.single("file"), async (req, res) => {
+  try {
+    const { user_id } = req.body;
 
-  singleUpload(req, res, function (err) {
-    if (err) {
-      console.error("❌ Erro no upload (multer):", err);
-      return res.status(400).json({ success: false, message: "Erro ao receber arquivo." });
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: "user_id não informado." });
     }
 
     if (!req.file) {
       console.error("⚠️ Nenhum arquivo recebido:", req.body);
-      return res.status(400).json({ success: false, message: "Campo 'file' não enviado ou vazio." });
+      return res.status(400).json({ success: false, message: "Arquivo não recebido." });
     }
 
     console.log("📥 Recebendo arquivo:", req.file.originalname);
     console.log("🧾 Caminho temporário:", req.file.path);
     console.log("📦 Tipo MIME:", req.file.mimetype);
 
-    // continua pro processamento normal
-    processarExtrato(req, res);
-  });
-});
-
-async function processarExtrato(req, res) {
-  try {
-    const { user_id } = req.body;
-    const filePath = req.file?.path;
-
-    if (!user_id) {
-      return res.status(400).json({ success: false, message: "user_id não informado." });
-    }
-
-    if (!filePath) {
-      console.error("❌ Caminho do arquivo ausente:", req.file);
-      return res.status(400).json({ success: false, message: "Falha ao salvar arquivo temporário." });
-    }
-
+    const filePath = req.file.path;
     let fileContent = "";
 
+    // 🧩 1️⃣ Lê o arquivo conforme o tipo
     if (req.file.mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
       fileContent = pdfData.text;
+    } else if (
+      req.file.mimetype === "application/vnd.ms-excel" ||
+      req.file.mimetype ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ) {
+      const workbook = XLSX.readFile(filePath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      fileContent = XLSX.utils.sheet_to_csv(sheet);
     } else {
       fileContent = fs.readFileSync(filePath, "utf8");
     }
 
-    console.log("🧠 Conteúdo inicial extraído (primeiros 200 chars):", fileContent.slice(0, 200));
-
-
-    // 1️⃣ Ler conteúdo (PDF, CSV, TXT)
-    let fileContent = "";
-    if (req.file.mimetype === "application/pdf") {
-      const dataBuffer = fs.readFileSync(filePath);
-      const pdfData = await pdf(dataBuffer);
-      fileContent = pdfData.text;
-    } else {
-      fileContent = fs.readFileSync(filePath, "utf8");
-    }
-
-    // 2️⃣ IA - Extrair transações
+    // 🧠 2️⃣ Chama IA
     const prompt = `
-      Você é um assistente financeiro.
-      Extraia todas as transações do extrato abaixo e devolva APENAS o JSON puro neste formato:
-      [
-        {
-          "data": "AAAA-MM-DD",
-          "descricao": "texto da transação",
-          "valor": 123.45,
-          "tipo": "entrada" ou "saida",
-          "categoria": "nome da categoria"
-        }
-      ]
+Extraia todas as transações do extrato abaixo e devolva SOMENTE JSON no formato:
+[
+  {"data":"AAAA-MM-DD","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"nome"}
+]
 
-      Extrato:
-      ${fileContent}
-    `;
+Extrato:
+${fileContent}
+`;
 
-    const response = await openai.chat.completions.create({
+    const ai = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
+      temperature: 0.1,
     });
 
-    let rawText = response.choices[0].message.content.trim();
+    let raw = (ai.choices?.[0]?.message?.content || "").trim();
+    console.log("🧠 IA bruta:", raw.slice(0, 200));
 
-    // 3️⃣ Parser seguro (ignora texto extra)
-    const match = rawText.match(/\[[\s\S]*\]/);
-    if (!match) {
-      console.error("⚠️ IA não retornou JSON válido:", rawText.slice(0, 200));
-      throw new Error("A IA não retornou um JSON válido de transações.");
+    // Remove qualquer prefixo tipo “Aqui está…”
+    const jsonStart = raw.indexOf("[");
+    if (jsonStart > 0) raw = raw.slice(jsonStart);
+    const jsonEnd = raw.lastIndexOf("]");
+    if (jsonEnd > 0) raw = raw.slice(0, jsonEnd + 1);
+
+    let extratoIA;
+    try {
+      extratoIA = JSON.parse(raw);
+    } catch (err) {
+      console.error("❌ Falha no JSON:", err.message);
+      return res.status(500).json({
+        success: false,
+        message: "A IA não retornou JSON válido.",
+      });
     }
 
-    const extratoIA = JSON.parse(match[0]);
+    // 💾 3️⃣ Insere no Supabase
+    const payload = extratoIA.map((t) => ({
+      user_id,
+      data: t.data || null,
+      descricao: t.descricao || "",
+      valor: Number(t.valor) || 0,
+      tipo: t.tipo === "entrada" ? "entrada" : "saida",
+      categoria: t.categoria || null,
+      criado_em: new Date(),
+    }));
 
-    // 4️⃣ Inserir no Supabase
-    const { data, error } = await supabase
-      .from("transacoes")
-      .insert(
-        extratoIA.map((t) => ({
-          user_id,
-          data: t.data,
-          descricao: t.descricao,
-          valor: t.valor,
-          tipo: t.tipo,
-          categoria: t.categoria,
-          criado_em: new Date(),
-        }))
-      );
-
-    if (error) throw error;
-
-    // 5️⃣ Limpar arquivo temporário
+    const { error } = await supabase.from("transacoes").insert(payload);
     fs.unlinkSync(filePath);
 
-    res.json({
+    if (error) {
+      console.error("❌ Erro ao salvar:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao salvar transações no banco.",
+      });
+    }
+
+    return res.json({
       success: true,
-      message: "Extrato processado com sucesso!",
-      transacoes: extratoIA,
+      message: `✅ Extrato processado com sucesso (${payload.length} transações).`,
     });
   } catch (err) {
-    console.error("❌ Erro ao processar extrato:", err);
-    res
-      .status(500)
-      .json({ success: false, message: "Erro ao processar extrato.", error: err.message });
+    console.error("💥 Erro inesperado:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao processar extrato.",
+      error: err.message,
+    });
   }
+});
+
 /* ============================================================
 💰 TRANSAÇÕES E RELATÓRIOS
 ============================================================ */
