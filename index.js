@@ -193,14 +193,16 @@ async function classificarTransacao(descricao, valor) {
 📤 PROCESSAR EXTRATO (IA + SUPABASE)
 ============================================================ */
 app.post("/processar-extrato", upload.single("file"), async (req, res) => {
-  const { user_id } = req.body;
-  if (!req.file) {
-    return res.status(400).json({ success: false, message: "Nenhum arquivo enviado." });
-  }
+  try {
+    const { user_id } = req.body;
 
-  const filePath = req.file.path;
-  let fileContent = "";
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "Falha ao armazenar o arquivo do extrato." });
+    }
 
+    const filePath = req.file.path;
+    let fileContent = "";
+    
   try {
     // 🧩 1️⃣ Ler o conteúdo do arquivo
     if (req.file.mimetype === "application/pdf") {
