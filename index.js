@@ -10,6 +10,7 @@ import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
 import { randomUUID } from "crypto";
 import multer from "multer";
+const upload = multer({ dest: "uploads/" });
 import fs from "fs";
 import pdf from "pdf-parse";
 import XLSX from "xlsx";
@@ -176,8 +177,6 @@ function detectarTipoFixo(descricao) {
 📤 UPLOAD DE EXTRATO + LEITURA IA + CLASSIFICAÇÃO AUTOMÁTICA
 ============================================================ */
 
-const upload = multer({ dest: "uploads/" });
-
 /* 🧠 Função de Classificação Aprendida */
 async function classificarTransacao(descricao, valor) {
   const { data: memoria } = await supabase
@@ -306,7 +305,6 @@ if (req.file.mimetype === "application/pdf") {
   fileContent = fs.readFileSync(filePath, "utf8");
 }
 
-const upload = multer({ dest: "uploads/" });
 
 /* 🧠 Função de Classificação Aprendida */
 async function classificarTransacao(descricao, valor) {
