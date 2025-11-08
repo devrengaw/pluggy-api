@@ -277,14 +277,33 @@ ${fileContent.slice(0, 3000)}
 
     console.log("💾 Transações extraídas:", extratoIA.length);
 
-    // 💾 Insere no Supabase
+   // 🧠 Função que converte datas de DD/MM/AA ou DD/MM/AAAA → YYYY-MM-DD
+function normalizarData(dataBruta) {
+  if (!dataBruta) return new Date().toISOString().split('T')[0];
+  try {
+    const partes = dataBruta.trim().split('/');
+    if (partes.length === 3) {
+      let [dia, mes, ano] = partes.map(p => p.padStart(2, '0'));
+      if (ano.length === 2) {
+        const anoNum = parseInt(ano, 10);
+        ano = anoNum < 50 ? `20${ano}` : `19${ano}`;
+      }
+      return `${ano}-${mes}-${dia}`; // formato ISO
+    }
+  } catch (err) {
+    console.warn("⚠️ Erro ao normalizar data:", dataBruta, err);
+  }
+  return new Date().toISOString().split('T')[0];
+}
+
+// 💾 Insere no Supabase com data corrigida
 const payload = extratoIA.map((t) => ({
   user_id,
   descricao: t.descricao || "",
   valor: Number(t.valor) || 0,
   tipo: t.tipo === "entrada" ? "entrada" : "saida",
   categoria: t.categoria || null,
-  data: t.data ? new Date(t.data) : new Date(), // 🧠 agora usa a data original da IA
+  data: normalizarData(t.data), // ✅ converte formatos DD/MM/AA e DD/MM/AAAA
   criado_em: new Date(),
 }));
     
