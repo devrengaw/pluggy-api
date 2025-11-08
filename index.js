@@ -275,10 +275,11 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Erro ao processar extrato:", err);
-    res
+       res
       .status(500)
       .json({ success: false, message: "Erro ao processar extrato.", error: err.message });
   }
+}); 
 
 /* ============================================================
 💰 TRANSAÇÕES E RELATÓRIOS
