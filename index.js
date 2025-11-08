@@ -10,11 +10,26 @@ import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
 import { randomUUID } from "crypto";
 import multer from "multer";
-const upload = multer({ storage: multer.memoryStorage() });
 import fs from "fs";
 import pdf from "pdf-parse";
 import XLSX from "xlsx";
 import path from "path";
+
+// ============================================================
+// 📁 CONFIGURAÇÃO DE UPLOADS (Render usa /tmp)
+// ============================================================
+const UPLOAD_DIR = "/tmp/uploads";
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const safeName = `${Date.now()}_${file.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_")}`;
+    cb(null, safeName);
+  },
+});
+
+const upload = multer({ storage });
 
 
 dotenv.config();
@@ -191,37 +206,33 @@ async function classificarTransacao(descricao, valor) {
 }
 
 /* ============================================================
-📤 PROCESSAR EXTRATO (IA + SUPABASE)
+📤 PROCESSAR EXTRATO (IA + SUPABASE) — versão corrigida
 ============================================================ */
 app.post("/processar-extrato", upload.single("file"), async (req, res) => {
   try {
+    console.log("📥 Recebendo arquivo:", req.file?.originalname);
+    console.log("🧾 Caminho temporário:", req.file?.path);
+    console.log("📦 Tipo MIME:", req.file?.mimetype);
+
     const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ success: false, message: "user_id não informado." });
 
-    if (!user_id) {
-      return res.status(400).json({ success: false, message: "user_id não informado." });
+    if (!req.file || !req.file.path) {
+      console.error("❌ Falha: arquivo não salvo pelo Multer.");
+      return res.status(400).json({ success: false, message: "Falha ao armazenar o arquivo." });
     }
-
-    if (!req.file) {
-      console.error("⚠️ Nenhum arquivo recebido:", req.body);
-      return res.status(400).json({ success: false, message: "Arquivo não recebido." });
-    }
-
-    console.log("📥 Recebendo arquivo:", req.file.originalname);
-    console.log("🧾 Caminho temporário:", req.file.path);
-    console.log("📦 Tipo MIME:", req.file.mimetype);
 
     const filePath = req.file.path;
     let fileContent = "";
 
-    // 🧩 1️⃣ Lê o arquivo conforme o tipo
+    // 🧩 Leitura do arquivo conforme tipo
     if (req.file.mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
       fileContent = pdfData.text;
     } else if (
       req.file.mimetype === "application/vnd.ms-excel" ||
-      req.file.mimetype ===
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ) {
       const workbook = XLSX.readFile(filePath);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -230,7 +241,9 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
       fileContent = fs.readFileSync(filePath, "utf8");
     }
 
-    // 🧠 2️⃣ Chama IA
+    console.log("✅ Arquivo lido com sucesso, tamanho:", fileContent.length);
+
+    // 🧠 Chama IA
     const prompt = `
 Extraia todas as transações do extrato abaixo e devolva SOMENTE JSON no formato:
 [
@@ -238,7 +251,7 @@ Extraia todas as transações do extrato abaixo e devolva SOMENTE JSON no format
 ]
 
 Extrato:
-${fileContent}
+${fileContent.slice(0, 3000)}
 `;
 
     const ai = await openai.chat.completions.create({
@@ -248,26 +261,23 @@ ${fileContent}
     });
 
     let raw = (ai.choices?.[0]?.message?.content || "").trim();
-    console.log("🧠 IA bruta:", raw.slice(0, 200));
+    console.log("🧠 IA respondeu:", raw.slice(0, 200));
 
-    // Remove qualquer prefixo tipo “Aqui está…”
     const jsonStart = raw.indexOf("[");
-    if (jsonStart > 0) raw = raw.slice(jsonStart);
     const jsonEnd = raw.lastIndexOf("]");
-    if (jsonEnd > 0) raw = raw.slice(0, jsonEnd + 1);
+    if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
 
     let extratoIA;
     try {
       extratoIA = JSON.parse(raw);
     } catch (err) {
-      console.error("❌ Falha no JSON:", err.message);
-      return res.status(500).json({
-        success: false,
-        message: "A IA não retornou JSON válido.",
-      });
+      console.error("❌ Falha ao interpretar JSON:", err.message);
+      return res.status(500).json({ success: false, message: "A IA não retornou JSON válido." });
     }
 
-    // 💾 3️⃣ Insere no Supabase
+    console.log("💾 Transações extraídas:", extratoIA.length);
+
+    // 💾 Insere no Supabase
     const payload = extratoIA.map((t) => ({
       user_id,
       data: t.data || null,
@@ -282,11 +292,8 @@ ${fileContent}
     fs.unlinkSync(filePath);
 
     if (error) {
-      console.error("❌ Erro ao salvar:", error);
-      return res.status(500).json({
-        success: false,
-        message: "Erro ao salvar transações no banco.",
-      });
+      console.error("❌ Erro ao salvar no Supabase:", error);
+      return res.status(500).json({ success: false, message: "Erro ao salvar no banco." });
     }
 
     return res.json({
