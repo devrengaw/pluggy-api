@@ -305,20 +305,6 @@ if (req.file.mimetype === "application/pdf") {
   fileContent = fs.readFileSync(filePath, "utf8");
 }
 
-
-/* 🧠 Função de Classificação Aprendida */
-async function classificarTransacao(descricao, valor) {
-  const { data: memoria } = await supabase
-    .from("memoria_essenciais")
-    .select("categoria")
-    .ilike("descricao", `%${descricao}%`)
-    .limit(1);
-
-  if (memoria?.length) return memoria[0].categoria;
-  return null;
-}
-
-
 /* ============================================================
 💰 TRANSAÇÕES E RELATÓRIOS
 ============================================================ */
