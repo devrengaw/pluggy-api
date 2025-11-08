@@ -9,8 +9,6 @@ import supabase from "./supabase.js";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
 import { randomUUID } from "crypto";
-import pdf from "pdf-parse";
-import XLSX from "xlsx";
 
 dotenv.config();
 
