@@ -9,6 +9,8 @@ import supabase from "./supabase.js";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
 import { randomUUID } from "crypto";
+import pdf from "pdf-parse";
+import XLSX from "xlsx";
 
 dotenv.config();
 
@@ -170,9 +172,6 @@ function detectarTipoFixo(descricao) {
 /* ============================================================
 📤 UPLOAD DE EXTRATO + LEITURA IA + CLASSIFICAÇÃO AUTOMÁTICA
 ============================================================ */
-import fs from "fs";
-import pdf from "pdf-parse";
-import XLSX from "xlsx";
 
 const upload = multer({ dest: "uploads/" });
 
