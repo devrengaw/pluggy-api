@@ -166,6 +166,185 @@ function detectarTipoFixo(descricao) {
   if (variaveis.some((p) => lower.includes(p))) return "variavel";
   return "variavel";
 }
+/* ============================================================
+📦 UPLOAD DE EXTRATO + LEITURA IA + CLASSIFICAÇÃO AUTOMÁTICA
+============================================================ */
+import multer from "multer";
+import fs from "fs";
+import pdf from "pdf-parse";
+import XLSX from "xlsx";
+
+let fileContent = "";
+
+if (req.file.mimetype === "application/pdf") {
+  const buffer = fs.readFileSync(filePath);
+  const pdfData = await pdf(buffer);
+  fileContent = pdfData.text;
+} else if (
+  req.file.mimetype === "application/vnd.ms-excel" ||
+  req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+) {
+  const workbook = XLSX.readFile(filePath);
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_csv(sheet);
+  fileContent = rows;
+} else {
+  fileContent = fs.readFileSync(filePath, "utf8");
+}
+
+const upload = multer({ dest: "uploads/" });
+
+/* 🧠 Função de Classificação Aprendida */
+async function classificarTransacao(descricao, valor) {
+  const { data: memoria } = await supabase
+    .from("memoria_essenciais")
+    .select("categoria")
+    .ilike("descricao", `%${descricao}%`)
+    .limit(1);
+
+  if (memoria?.length) return memoria[0].categoria;
+  return null;
+}
+
+/* 📤 Endpoint principal de processamento de extrato */
+app.post("/processar-extrato", upload.single("file"), async (req, res) => {
+  const { user_id } = req.body;
+  if (!req.file) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Nenhum arquivo enviado." });
+  }
+
+  const filePath = req.file.path;
+  const nomeArquivo = req.file.originalname;
+  let fileContent = "";
+
+  try {
+    /* ============================================================
+    🧾 1️⃣ Leitura do arquivo (PDF, Excel, CSV, TXT)
+    ============================================================= */
+    const mime = req.file.mimetype;
+
+    if (mime === "application/pdf") {
+      // PDF — requer 'pdf-parse'
+      const pdf = (await import("pdf-parse")).default;
+      const buffer = fs.readFileSync(filePath);
+      const data = await pdf(buffer);
+      fileContent = data.text;
+    } else if (
+      mime ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      mime === "application/vnd.ms-excel"
+    ) {
+      // Planilha Excel — requer 'xlsx'
+      const XLSX = (await import("xlsx")).default;
+      const workbook = XLSX.readFile(filePath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      fileContent = XLSX.utils.sheet_to_csv(sheet);
+    } else {
+      // Texto puro (CSV, TXT etc.)
+      fileContent = fs.readFileSync(filePath, "utf8");
+    }
+
+    /* ============================================================
+    🤖 2️⃣ Processamento IA
+    ============================================================= */
+    const prompt = `
+      Você é um assistente financeiro do FinanceFlow.
+      Leia o extrato bancário abaixo e extraia todas as transações, retornando um JSON.
+      Use o formato:
+      [
+        {
+          "data": "AAAA-MM-DD",
+          "descricao": "texto da transação",
+          "valor": 123.45,
+          "tipo": "entrada" ou "saida",
+          "categoria": "nome da categoria (como Alimentação, Transporte, Salário, etc.)"
+        }
+      ]
+
+      Extrato:
+      ${fileContent}
+    `;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const extratoIA = JSON.parse(response.choices[0].message.content);
+
+    /* ============================================================
+    🧠 3️⃣ Classificação com memória de aprendizado
+    ============================================================= */
+    const transacoes = await Promise.all(
+      extratoIA.map(async (t) => {
+        const categoriaAprendida = await classificarTransacao(
+          t.descricao,
+          t.valor
+        );
+        return {
+          user_id,
+          data: t.data,
+          descricao: t.descricao,
+          valor: t.valor,
+          tipo: t.tipo,
+          categoria: categoriaAprendida || t.categoria,
+          criado_em: new Date(),
+        };
+      })
+    );
+
+    /* ============================================================
+    💾 4️⃣ Inserção no Supabase
+    ============================================================= */
+    const { data, error } = await supabase
+      .from("transacoes")
+      .insert(transacoes);
+
+    if (error) throw error;
+
+    /* ============================================================
+    🧮 5️⃣ Log de processamento
+    ============================================================= */
+    await supabase.from("logs_extratos").insert({
+      user_id,
+      nome_arquivo: nomeArquivo,
+      total_transacoes: transacoes.length,
+      sucesso: true,
+      criado_em: new Date(),
+    });
+
+    /* ============================================================
+    🧹 6️⃣ Limpeza e retorno
+    ============================================================= */
+    fs.unlinkSync(filePath);
+
+    res.json({
+      success: true,
+      message: "Extrato processado com sucesso!",
+      total: transacoes.length,
+      transacoes: transacoes,
+    });
+  } catch (err) {
+    console.error("❌ Erro ao processar extrato:", err);
+
+    // Grava log de erro
+    await supabase.from("logs_extratos").insert({
+      user_id,
+      nome_arquivo: req.file?.originalname || "desconhecido",
+      total_transacoes: 0,
+      sucesso: false,
+      criado_em: new Date(),
+    });
+
+    res.status(500).json({
+      success: false,
+      message: "Erro ao processar extrato.",
+      error: err.message,
+    });
+  }
+});
 
 /* ============================================================
 💰 TRANSAÇÕES E RELATÓRIOS
@@ -1056,6 +1235,7 @@ app.post("/limpar-dados-completos", async (req, res) => {
     });
   }
 });
+
 
 /* ============================================================
 🌐 SERVER
