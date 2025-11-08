@@ -9,6 +9,11 @@ import supabase from "./supabase.js";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
 import { randomUUID } from "crypto";
+import multer from "multer";
+import fs from "fs";
+import pdf from "pdf-parse";
+import XLSX from "xlsx";
+
 
 dotenv.config();
 
@@ -282,10 +287,6 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
 /* ============================================================
 📦 UPLOAD DE EXTRATO + LEITURA IA + CLASSIFICAÇÃO AUTOMÁTICA
 ============================================================ */
-import multer from "multer";
-import fs from "fs";
-import pdf from "pdf-parse";
-import XLSX from "xlsx";
 
 let fileContent = "";
 
