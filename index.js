@@ -10,7 +10,7 @@ import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js"; // 🔁 Realtime
 import { randomUUID } from "crypto";
 import multer from "multer";
-const upload = multer({ dest: "uploads/" });
+const upload = multer({ storage: multer.memoryStorage() });
 import fs from "fs";
 import pdf from "pdf-parse";
 import XLSX from "xlsx";
@@ -200,15 +200,13 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
       return res.status(400).json({ success: false, message: "Falha ao armazenar o arquivo do extrato." });
     }
 
-    const filePath = req.file.path;
-    let fileContent = "";
+let fileContent = "";
+if (req.file.mimetype === "application/pdf") {
+  const pdfData = await pdf(req.file.buffer);
+  fileContent = pdfData.text;
+}
     
-    // 🧩 1️⃣ Ler o conteúdo do arquivo
-    if (req.file.mimetype === "application/pdf") {
-      const buffer = fs.readFileSync(filePath);
-      const pdfData = await pdf(buffer);
-      fileContent = pdfData.text;
-    } else if (
+    else if (
       req.file.mimetype === "application/vnd.ms-excel" ||
       req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ) {
@@ -243,7 +241,40 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
       temperature: 0.2,
     });
 
-    const extratoIA = JSON.parse(response.choices[0].message.content);
+    // 🧠 2️⃣ Enviar pra IA extrair as transações
+const prompt = `
+Você é um assistente financeiro.
+Extraia todas as transações do extrato abaixo e devolva APENAS o JSON puro neste formato:
+[
+  {
+    "data": "AAAA-MM-DD",
+    "descricao": "texto da transação",
+    "valor": 123.45,
+    "tipo": "entrada" ou "saida",
+    "categoria": "nome da categoria"
+  }
+]
+
+Extrato:
+${fileContent}
+`;
+
+const response = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: prompt }],
+  temperature: 0.2,
+});
+
+let rawText = response.choices[0].message.content.trim();
+
+// 🔍 tenta extrair apenas o conteúdo JSON, mesmo que venha texto antes
+const match = rawText.match(/\[[\s\S]*\]/);
+if (!match) {
+  console.error("⚠️ IA não retornou JSON válido:", rawText.slice(0, 200));
+  throw new Error("A IA não retornou um JSON válido de transações.");
+}
+
+const extratoIA = JSON.parse(match[0]);
 
     // 💾 3️⃣ Inserir no Supabase
     const { data, error } = await supabase
