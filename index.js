@@ -193,66 +193,62 @@ async function classificarTransacao(descricao, valor) {
 📤 PROCESSAR EXTRATO (IA + SUPABASE)
 ============================================================ */
 app.post("/processar-extrato", upload.single("file"), async (req, res) => {
+  const { user_id } = req.body;
+  const filePath = req.file?.path;
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, message: "Nenhum arquivo enviado." });
+  }
+
   try {
-    const { user_id } = req.body;
+    console.log("📥 Recebendo arquivo:", req.file.originalname);
 
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: "Falha ao armazenar o arquivo do extrato." });
-    }
-
-let fileContent = "";
-if (req.file.mimetype === "application/pdf") {
-  const pdfData = await pdf(req.file.buffer);
-  fileContent = pdfData.text;
-}
-    
-    else if (
-      req.file.mimetype === "application/vnd.ms-excel" ||
-      req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    ) {
-      const workbook = XLSX.readFile(filePath);
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      fileContent = XLSX.utils.sheet_to_csv(sheet);
+    // 1️⃣ Ler conteúdo (PDF, CSV, TXT)
+    let fileContent = "";
+    if (req.file.mimetype === "application/pdf") {
+      const dataBuffer = fs.readFileSync(filePath);
+      const pdfData = await pdf(dataBuffer);
+      fileContent = pdfData.text;
     } else {
       fileContent = fs.readFileSync(filePath, "utf8");
     }
 
-    // 🧠 2️⃣ Enviar pra IA extrair as transações
-const prompt = `
-Você é um assistente financeiro.
-Extraia todas as transações do extrato abaixo e devolva APENAS o JSON puro neste formato:
-[
-  {
-    "data": "AAAA-MM-DD",
-    "descricao": "texto da transação",
-    "valor": 123.45,
-    "tipo": "entrada" ou "saida",
-    "categoria": "nome da categoria"
-  }
-]
+    // 2️⃣ IA - Extrair transações
+    const prompt = `
+      Você é um assistente financeiro.
+      Extraia todas as transações do extrato abaixo e devolva APENAS o JSON puro neste formato:
+      [
+        {
+          "data": "AAAA-MM-DD",
+          "descricao": "texto da transação",
+          "valor": 123.45,
+          "tipo": "entrada" ou "saida",
+          "categoria": "nome da categoria"
+        }
+      ]
 
-Extrato:
-${fileContent}
-`;
+      Extrato:
+      ${fileContent}
+    `;
 
-const response = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  messages: [{ role: "user", content: prompt }],
-  temperature: 0.2,
-});
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+    });
 
-let rawText = response.choices[0].message.content.trim();
+    let rawText = response.choices[0].message.content.trim();
 
-// 🔍 tenta extrair apenas o conteúdo JSON, mesmo que venha texto antes
-const match = rawText.match(/\[[\s\S]*\]/);
-if (!match) {
-  console.error("⚠️ IA não retornou JSON válido:", rawText.slice(0, 200));
-  throw new Error("A IA não retornou um JSON válido de transações.");
-}
+    // 3️⃣ Parser seguro (ignora texto extra)
+    const match = rawText.match(/\[[\s\S]*\]/);
+    if (!match) {
+      console.error("⚠️ IA não retornou JSON válido:", rawText.slice(0, 200));
+      throw new Error("A IA não retornou um JSON válido de transações.");
+    }
 
-const extratoIA = JSON.parse(match[0]);
+    const extratoIA = JSON.parse(match[0]);
 
-    // 💾 3️⃣ Inserir no Supabase
+    // 4️⃣ Inserir no Supabase
     const { data, error } = await supabase
       .from("transacoes")
       .insert(
@@ -269,18 +265,19 @@ const extratoIA = JSON.parse(match[0]);
 
     if (error) throw error;
 
-    // 🧹 4️⃣ Apagar arquivo temporário
+    // 5️⃣ Limpar arquivo temporário
     fs.unlinkSync(filePath);
 
-    // ✅ 5️⃣ Retornar sucesso
-    return res.json({
+    res.json({
       success: true,
       message: "Extrato processado com sucesso!",
       transacoes: extratoIA,
     });
   } catch (err) {
     console.error("❌ Erro ao processar extrato:", err);
-    res.status(500).json({ success: false, message: "Erro ao processar extrato.", error: err.message });
+    res
+      .status(500)
+      .json({ success: false, message: "Erro ao processar extrato.", error: err.message });
   }
 });
 
