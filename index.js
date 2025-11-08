@@ -278,15 +278,16 @@ ${fileContent.slice(0, 3000)}
     console.log("💾 Transações extraídas:", extratoIA.length);
 
     // 💾 Insere no Supabase
-   const payload = extratoIA.map((t) => ({
+  const payload = extratoIA.map((t) => ({
   user_id,
+  data: t.data || null,
   descricao: t.descricao || "",
   valor: Number(t.valor) || 0,
   tipo: t.tipo === "entrada" ? "entrada" : "saida",
   categoria: t.categoria || null,
-  created_at: t.data ? new Date(t.data) : new Date(),
+  criado_em: new Date(),
 }));
-
+    
     const { error } = await supabase.from("transacoes").insert(payload);
     fs.unlinkSync(filePath);
 
