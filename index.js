@@ -170,7 +170,6 @@ function detectarTipoFixo(descricao) {
 /* ============================================================
 📤 UPLOAD DE EXTRATO + LEITURA IA + CLASSIFICAÇÃO AUTOMÁTICA
 ============================================================ */
-import multer from "multer";
 import fs from "fs";
 import pdf from "pdf-parse";
 import XLSX from "xlsx";
