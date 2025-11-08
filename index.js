@@ -189,7 +189,9 @@ async function classificarTransacao(descricao, valor) {
   return null;
 }
 
-/* 📤 Endpoint principal de processamento de extrato */
+/* ============================================================
+📤 PROCESSAR EXTRATO (IA + SUPABASE)
+============================================================ */
 app.post("/processar-extrato", upload.single("file"), async (req, res) => {
   const { user_id } = req.body;
   if (!req.file) {
@@ -197,19 +199,17 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
   }
 
   const filePath = req.file.path;
-  const nomeArquivo = req.file.originalname;
   let fileContent = "";
 
   try {
-    // 1️⃣ Detectar tipo de arquivo e extrair texto
-    const mime = req.file.mimetype;
-    if (mime === "application/pdf") {
+    // 🧩 1️⃣ Ler o conteúdo do arquivo
+    if (req.file.mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
-      const data = await pdf(buffer);
-      fileContent = data.text;
+      const pdfData = await pdf(buffer);
+      fileContent = pdfData.text;
     } else if (
-      mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-      mime === "application/vnd.ms-excel"
+      req.file.mimetype === "application/vnd.ms-excel" ||
+      req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ) {
       const workbook = XLSX.readFile(filePath);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -218,18 +218,17 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
       fileContent = fs.readFileSync(filePath, "utf8");
     }
 
-    // 2️⃣ Enviar para IA
+    // 🧠 2️⃣ Enviar pra IA extrair as transações
     const prompt = `
-      Você é um assistente financeiro do FinanceFlow.
-      Leia o extrato bancário abaixo e extraia todas as transações.
-      Responda APENAS com JSON válido, no formato:
+      Você é um assistente financeiro.
+      Extraia todas as transações do extrato abaixo e devolva um JSON neste formato:
       [
         {
           "data": "AAAA-MM-DD",
           "descricao": "texto da transação",
           "valor": 123.45,
           "tipo": "entrada" ou "saida",
-          "categoria": "nome da categoria (ex: Alimentação, Transporte, Salário, etc.)"
+          "categoria": "nome da categoria"
         }
       ]
 
@@ -240,46 +239,40 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
     });
 
     const extratoIA = JSON.parse(response.choices[0].message.content);
 
-    // 3️⃣ Classificação com aprendizado local
-    const transacoes = await Promise.all(
-      extratoIA.map(async (t) => {
-        const categoriaAprendida = await classificarTransacao(t.descricao, t.valor);
-        return {
+    // 💾 3️⃣ Inserir no Supabase
+    const { data, error } = await supabase
+      .from("transacoes")
+      .insert(
+        extratoIA.map((t) => ({
           user_id,
           data: t.data,
           descricao: t.descricao,
           valor: t.valor,
           tipo: t.tipo,
-          categoria: categoriaAprendida || t.categoria,
+          categoria: t.categoria,
           criado_em: new Date(),
-        };
-      })
-    );
+        }))
+      );
 
-    // 4️⃣ Inserir no Supabase
-    const { data, error } = await supabase.from("transacoes").insert(transacoes);
     if (error) throw error;
 
-    // 5️⃣ Excluir arquivo temporário
+    // 🧹 4️⃣ Apagar arquivo temporário
     fs.unlinkSync(filePath);
 
-    res.json({
+    // ✅ 5️⃣ Retornar sucesso
+    return res.json({
       success: true,
       message: "Extrato processado com sucesso!",
-      total: transacoes.length,
-      transacoes,
+      transacoes: extratoIA,
     });
   } catch (err) {
     console.error("❌ Erro ao processar extrato:", err);
-    res.status(500).json({
-      success: false,
-      message: "Erro ao processar extrato.",
-      error: err.message,
-    });
+    res.status(500).json({ success: false, message: "Erro ao processar extrato.", error: err.message });
   }
 });
 
@@ -289,10 +282,7 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
 
 let fileContent = "";
 
-if (req.file.mimetype === "application/pdf") {
-  const buffer = fs.readFileSync(filePath);
-  const pdfData = await pdf(buffer);
-  fileContent = pdfData.text;
+
 } else if (
   req.file.mimetype === "application/vnd.ms-excel" ||
   req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
