@@ -14,6 +14,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 import fs from "fs";
 import pdf from "pdf-parse";
 import XLSX from "xlsx";
+import path from "path";
 
 
 dotenv.config();
@@ -193,94 +194,166 @@ async function classificarTransacao(descricao, valor) {
 📤 PROCESSAR EXTRATO (IA + SUPABASE)
 ============================================================ */
 app.post("/processar-extrato", upload.single("file"), async (req, res) => {
-  const { user_id } = req.body;
-  const filePath = req.file?.path;
 
-  if (!req.file) {
-    return res.status(400).json({ success: false, message: "Nenhum arquivo enviado." });
-  }
+// garante uploads/ em runtime (Render tem FS efêmero, mas funciona p/ request atual)
+const UPLOAD_DIR = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
 
+const upload = multer({
+  dest: UPLOAD_DIR,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+});
+
+function extractFirstJson(text) {
+  // tenta pegar o primeiro bloco { ... } ou [ ... ]
+  const obj = text.match(/\{[\s\S]*\}$/m);
+  const arr = text.match(/\[[\s\S]*\]$/m);
+  const picked = (arr && arr[0]) || (obj && obj[0]);
+  return picked || text; // se não achar, devolve original (vai falhar no parse e cair no catch)
+}
+
+app.post("/processar-extrato", upload.single("file"), async (req, res) => {
   try {
-    console.log("📥 Recebendo arquivo:", req.file.originalname);
+    const { user_id } = req.body;
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: "user_id não enviado" });
+    }
 
-    // 1️⃣ Ler conteúdo (PDF, CSV, TXT)
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "Arquivo (file) não enviado" });
+    }
+
+    // DEBUG útil nos logs do Render
+    console.log("🔎 /processar-extrato", {
+      user_id,
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      path: req.file.path,
+    });
+
+    const allowed = new Set([
+      "application/pdf",
+      "text/csv",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "text/plain",
+    ]);
+    if (!allowed.has(req.file.mimetype)) {
+      // ainda assim tentaremos ler como texto pra dar feedback
+      console.warn("⚠️ MIME não esperado:", req.file.mimetype);
+    }
+
+    const filePath = req.file.path;
     let fileContent = "";
+
+    // 1) ler arquivo
     if (req.file.mimetype === "application/pdf") {
-      const dataBuffer = fs.readFileSync(filePath);
-      const pdfData = await pdf(dataBuffer);
-      fileContent = pdfData.text;
+      const buffer = fs.readFileSync(filePath);
+      const pdfData = await pdf(buffer);
+      fileContent = pdfData.text || "";
+    } else if (
+      req.file.mimetype === "application/vnd.ms-excel" ||
+      req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ) {
+      const workbook = XLSX.readFile(filePath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      fileContent = XLSX.utils.sheet_to_csv(sheet);
     } else {
+      // csv / txt / qualquer outro → tenta como texto
       fileContent = fs.readFileSync(filePath, "utf8");
     }
 
-    // 2️⃣ IA - Extrair transações
-    const prompt = `
-      Você é um assistente financeiro.
-      Extraia todas as transações do extrato abaixo e devolva APENAS o JSON puro neste formato:
-      [
-        {
-          "data": "AAAA-MM-DD",
-          "descricao": "texto da transação",
-          "valor": 123.45,
-          "tipo": "entrada" ou "saida",
-          "categoria": "nome da categoria"
-        }
-      ]
-
-      Extrato:
-      ${fileContent}
-    `;
-
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-    });
-
-    let rawText = response.choices[0].message.content.trim();
-
-    // 3️⃣ Parser seguro (ignora texto extra)
-    const match = rawText.match(/\[[\s\S]*\]/);
-    if (!match) {
-      console.error("⚠️ IA não retornou JSON válido:", rawText.slice(0, 200));
-      throw new Error("A IA não retornou um JSON válido de transações.");
+    if (!fileContent || fileContent.trim().length < 3) {
+      fs.unlink(filePath, () => {});
+      return res.status(400).json({
+        success: false,
+        message: "Arquivo vazio ou ilegível.",
+      });
     }
 
-    const extratoIA = JSON.parse(match[0]);
+    // 2) pedir pra IA extrair (instrução curta e objetiva)
+    const prompt =
+      `Extraia todas as transações do extrato a seguir e responda SOMENTE com um JSON válido ` +
+      `no formato de array. NADA de texto fora do JSON.\n\n` +
+      `Formato:\n[\n  {"data":"AAAA-MM-DD","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"nome"}\n]\n\n` +
+      `Extrato bruto:\n${fileContent}`;
 
-    // 4️⃣ Inserir no Supabase
-    const { data, error } = await supabase
-      .from("transacoes")
-      .insert(
-        extratoIA.map((t) => ({
-          user_id,
-          data: t.data,
-          descricao: t.descricao,
-          valor: t.valor,
-          tipo: t.tipo,
-          categoria: t.categoria,
-          criado_em: new Date(),
-        }))
-      );
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.1,
+    });
 
-    if (error) throw error;
+    let raw = (ai.choices?.[0]?.message?.content || "").trim();
+    // LOG pra quando vier “Aqui está…”
+    console.log("🧠 IA (primeiros 160 chars):", raw.slice(0, 160));
 
-    // 5️⃣ Limpar arquivo temporário
-    fs.unlinkSync(filePath);
+    // 3) “podar” para o 1º JSON encontrado
+    raw = extractFirstJson(raw);
 
-    res.json({
+    let extratoIA;
+    try {
+      extratoIA = JSON.parse(raw);
+    } catch (jsonErr) {
+      console.error("❌ Falha no JSON.parse:", jsonErr.message);
+      fs.unlink(filePath, () => {});
+      return res.status(500).json({
+        success: false,
+        message: "A IA não retornou JSON válido. Tente outro arquivo ou formato.",
+        detail: "json_parse_failed",
+      });
+    }
+
+    if (!Array.isArray(extratoIA)) {
+      fs.unlink(filePath, () => {});
+      return res.status(500).json({
+        success: false,
+        message: "A IA não retornou um array de transações.",
+        detail: "not_array",
+      });
+    }
+
+    // 4) inserir no Supabase
+    const payload = extratoIA.map((t) => ({
+      user_id,
+      data: t.data || null,
+      descricao: t.descricao || "",
+      valor: Number(t.valor) || 0,
+      tipo: t.tipo === "entrada" ? "entrada" : "saida",
+      categoria: t.categoria || null,
+      criado_em: new Date(),
+    }));
+
+    const { error } = await supabase.from("transacoes").insert(payload);
+    fs.unlink(filePath, () => {});
+
+    if (error) {
+      console.error("❌ Erro supabase.insert:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao salvar transações.",
+        detail: "db_insert_failed",
+      });
+    }
+
+    return res.json({
       success: true,
-      message: "Extrato processado com sucesso!",
-      transacoes: extratoIA,
+      message: `Extrato processado com sucesso! ${payload.length} transações salvas.`,
+      count: payload.length,
     });
   } catch (err) {
-    console.error("❌ Erro ao processar extrato:", err);
-       res
-      .status(500)
-      .json({ success: false, message: "Erro ao processar extrato.", error: err.message });
+    console.error("💥 Erro inesperado /processar-extrato:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao processar extrato.",
+      error: err.message,
+      detail: "unexpected",
+    });
   }
-}); 
-
+});
 /* ============================================================
 💰 TRANSAÇÕES E RELATÓRIOS
 ============================================================ */
