@@ -218,30 +218,6 @@ if (req.file.mimetype === "application/pdf") {
     }
 
     // 🧠 2️⃣ Enviar pra IA extrair as transações
-    const prompt = `
-      Você é um assistente financeiro.
-      Extraia todas as transações do extrato abaixo e devolva um JSON neste formato:
-      [
-        {
-          "data": "AAAA-MM-DD",
-          "descricao": "texto da transação",
-          "valor": 123.45,
-          "tipo": "entrada" ou "saida",
-          "categoria": "nome da categoria"
-        }
-      ]
-
-      Extrato:
-      ${fileContent}
-    `;
-
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-    });
-
-    // 🧠 2️⃣ Enviar pra IA extrair as transações
 const prompt = `
 Você é um assistente financeiro.
 Extraia todas as transações do extrato abaixo e devolva APENAS o JSON puro neste formato:
