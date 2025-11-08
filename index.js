@@ -46,23 +46,6 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 // ============================================================
-// 🔧 UTILITÁRIOS TELEGRAM
-// ============================================================
-async function sendMessage(chatId, text, reply_markup = null) {
-  try {
-    const payload = { chat_id: chatId, text, parse_mode: "Markdown" };
-    if (reply_markup) payload.reply_markup = reply_markup;
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  } catch (err) {
-    console.error("❌ Erro ao enviar mensagem:", err);
-  }
-}
-
-// ============================================================
 // 🧠 Função auxiliar — normaliza data DD/MM/AA → YYYY-MM-DD
 // ============================================================
 function normalizarData(dataBruta) {
@@ -1234,11 +1217,6 @@ app.post("/limpar-dados-completos", async (req, res) => {
   }
 });
 
-
-/* ============================================================
-🌐 SERVER
-============================================================ */
-const port = process.env.PORT || 10000;
 
 /* ============================================================
 🕒 VERIFICAÇÃO AUTOMÁTICA DE TESTES EXPIRADOS
