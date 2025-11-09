@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA com chunking + feedback dinâmico)
+🧠 ANALISAR EXTRATO (IA completa + fallback regex + logs detalhados)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -58,7 +58,6 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
 
     const filePath = req.file.path;
     const mimetype = req.file.mimetype;
-
     let textoExtraido = "";
 
     // 1️⃣ Ler o arquivo conforme tipo
@@ -83,50 +82,108 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       textoExtraido = fs.readFileSync(filePath, "utf8");
     }
 
-    // Remove o arquivo temporário
     fs.unlinkSync(filePath);
-
-    // 2️⃣ Dividir texto em partes de 3000 caracteres
-    const partes = [];
-    for (let i = 0; i < textoExtraido.length; i += 3000) {
-      partes.push(textoExtraido.slice(i, i + 3000));
+    if (!textoExtraido || textoExtraido.trim().length < 50) {
+      return res.status(400).json({ success: false, message: "Não foi possível ler o extrato." });
     }
 
-    console.log(`📄 Extrato dividido em ${partes.length} partes para análise IA.`);
+    console.log(`📄 Texto extraído do extrato: ${textoExtraido.length} caracteres.`);
+    console.log("🤖 Enviando para IA...");
 
-    let todasTransacoes = [];
+    // 2️⃣ Enviar o extrato inteiro para a IA
+    const prompt = `
+Você é um analista financeiro.
+A seguir está o conteúdo de um extrato bancário.
+Extraia TODAS as transações reais, ignorando cabeçalhos, totais e saldos.
 
-    // 3️⃣ Processar cada parte individualmente
-    for (let i = 0; i < partes.length; i++) {
-      console.log(`🤖 Analisando parte ${i + 1} de ${partes.length}...`);
-      const prompt = `
-      Você é um analista financeiro.
-      Extraia todas as transações reais do extrato bancário abaixo e devolva SOMENTE JSON no formato:
-      [
-        {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
-      ]
-      Extrato:
-      ${partes[i]}
-      `;
+Responda SOMENTE com JSON válido no formato:
+[
+  {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
+]
 
-      const ai = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.1,
-      });
+Caso não encontre nenhuma transação, devolva um array vazio: [].
 
-      let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
-      const jsonStart = raw.indexOf("[");
-      const jsonEnd = raw.lastIndexOf("]");
-      if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+Extrato:
+"""${textoExtraido.slice(0, 50000)}"""
+`;
 
-      try {
-        const trans = JSON.parse(raw);
-        todasTransacoes.push(...trans);
-      } catch (err) {
-        console.warn(`⚠️ Parte ${i + 1}: erro ao interpretar JSON`);
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0,
+      top_p: 1,
+    });
+
+    let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
+    const jsonStart = raw.indexOf("[");
+    const jsonEnd = raw.lastIndexOf("]");
+    if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+
+    let transacoesIA = [];
+    try {
+      transacoesIA = JSON.parse(raw);
+    } catch (err) {
+      console.warn("⚠️ Falha ao interpretar resposta da IA:", err.message);
+    }
+
+    console.log(`📊 IA detectou ${transacoesIA.length || 0} transações iniciais.`);
+
+    // 3️⃣ Fallback local via regex (caso a IA tenha ignorado linhas)
+    if (!transacoesIA.length) {
+      console.log("⚙️ IA retornou vazio — aplicando fallback regex local...");
+      const linhas = textoExtraido.split("\n").filter((l) => /\d{2}\/\d{2}\/\d{2,4}/.test(l));
+      const transacoesRegex = [];
+
+      for (const linha of linhas) {
+        const dataMatch = linha.match(/\d{2}\/\d{2}\/\d{2,4}/);
+        const valorMatch = linha.match(/\d{1,3}(?:\.\d{3})*,\d{2}/);
+        if (dataMatch && valorMatch) {
+          transacoesRegex.push({
+            data: dataMatch[0],
+            descricao: linha
+              .replace(dataMatch[0], "")
+              .replace(valorMatch[0], "")
+              .trim(),
+            valor: parseFloat(valorMatch[0].replace(/\./g, "").replace(",", ".")),
+            tipo: /cred|dep|receb/i.test(linha) ? "entrada" : "saida",
+          });
+        }
       }
+
+      transacoesIA = transacoesRegex;
+      console.log(`📊 Fallback detectou ${transacoesRegex.length} transações.`);
     }
+
+    // 4️⃣ Limpeza e deduplicação
+    const unicas = (transacoesIA || []).filter(
+      (t, idx, arr) =>
+        t.data &&
+        !isNaN(t.valor) &&
+        arr.findIndex(
+          (x) =>
+            x.data === t.data &&
+            x.descricao === t.descricao &&
+            Number(x.valor) === Number(t.valor)
+        ) === idx
+    );
+
+    console.log(`✅ Total final consolidado: ${unicas.length} transações.`);
+
+    return res.json({
+      success: true,
+      user_id,
+      count: unicas.length,
+      transacoes: unicas,
+    });
+  } catch (err) {
+    console.error("💥 Erro IA:", err);
+    res.status(500).json({
+      success: false,
+      message: "Erro interno ao analisar extrato.",
+      error: err.message,
+    });
+  }
+});
 
     // 4️⃣ Remover duplicadas
     const unicas = todasTransacoes.filter(
