@@ -47,6 +47,26 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
+// ============================================================
+// 🧠 Função auxiliar — normaliza data DD/MM/AA → YYYY-MM-DD
+// ============================================================
+function normalizarData(dataBruta) {
+  if (!dataBruta) return new Date().toISOString().split("T")[0];
+  try {
+    const partes = dataBruta.trim().split("/");
+    if (partes.length === 3) {
+      let [dia, mes, ano] = partes.map((p) => p.padStart(2, "0"));
+      if (ano.length === 2) {
+        const anoNum = parseInt(ano, 10);
+        ano = anoNum < 50 ? `20${ano}` : `19${ano}`;
+      }
+      return `${ano}-${mes}-${dia}`;
+    }
+  } catch (err) {
+    console.warn("⚠️ Erro ao normalizar data:", dataBruta, err);
+  }
+  return new Date().toISOString().split("T")[0];
+}
 
 /* ============================================================
 📤 PROCESSAR EXTRATO (Universal Parser + IA + SUPABASE)
