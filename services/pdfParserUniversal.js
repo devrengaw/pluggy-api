@@ -1,5 +1,5 @@
 // services/pdfParserUniversal.js
-// Parser universal de extratos bancários (PDF / CSV / XLSX) — FinanceFlow
+// Parser Universal 2.0 — Multi-banco, datas persistentes, detecção de crédito/débito
 
 import fs from "fs";
 import pdf from "pdf-parse";
@@ -8,28 +8,29 @@ import XLSX from "xlsx";
 /* ============================================================
 🔧 Funções auxiliares
 ============================================================ */
-
-// Converte data brasileira dd/mm/aa → YYYY-MM-DD
-function normalizarData(dataBruta) {
+export function normalizarData(dataBruta) {
+  if (!dataBruta) return new Date().toISOString().split("T")[0];
   try {
-    const partes = dataBruta.split("/");
-    let [dia, mes, ano] = partes;
-    if (ano.length === 2) ano = `20${ano}`;
-    return `${ano}-${mes}-${dia}`;
+    const partes = dataBruta.trim().split("/");
+    if (partes.length === 3) {
+      let [dia, mes, ano] = partes.map((p) => p.padStart(2, "0"));
+      if (ano.length === 2) {
+        const anoNum = parseInt(ano, 10);
+        ano = anoNum < 50 ? `20${ano}` : `19${ano}`;
+      }
+      return `${ano}-${mes}-${dia}`;
+    }
   } catch {
     return new Date().toISOString().split("T")[0];
   }
 }
 
-// Extrai primeiro valor monetário encontrado
-function parseValor(texto) {
-  const match = texto.match(/(\d{1,3}(?:\.\d{3})*,\d{2})/);
-  if (!match) return null;
-  const valor = parseFloat(match[1].replace(/\./g, "").replace(",", "."));
-  return valor;
+// Limpa o texto removendo espaços e símbolos redundantes
+function limparTexto(txt) {
+  return txt.replace(/\s+/g, " ").replace(/\t/g, " ").trim();
 }
 
-// Detecta o banco com base no texto
+// Detecta o banco no texto do extrato
 function detectarBanco(texto) {
   const lower = texto.toLowerCase();
   if (lower.includes("bradesco")) return "bradesco";
@@ -42,25 +43,46 @@ function detectarBanco(texto) {
   return "generico";
 }
 
-// Classifica tipo de transação com base no texto
-function detectarTipo(texto, valor) {
-  const lower = texto.toLowerCase();
-  if (lower.includes("depósito") || lower.includes("crédito") || lower.includes("receb") || lower.includes("pix recebido"))
+// Detecta se o texto indica crédito (entrada) ou débito (saída)
+function detectarTipoLinha(line) {
+  const lower = line.toLowerCase();
+  if (
+    lower.includes("cred") ||
+    lower.includes("depósito") ||
+    lower.includes("receb") ||
+    lower.includes("pix recebido")
+  )
     return "entrada";
-  if (lower.includes("débito") || lower.includes("pago") || lower.includes("pix enviado") || lower.includes("compra"))
+  if (
+    lower.includes("deb") ||
+    lower.includes("pagamento") ||
+    lower.includes("saque") ||
+    lower.includes("pix enviado") ||
+    lower.includes("compra") ||
+    lower.includes("tarifa")
+  )
     return "saida";
-  if (valor < 0) return "saida";
-  return "saida"; // padrão
+  return null; // indefinido
+}
+
+// Extrai o valor certo da linha (ignora saldo quando há 2 valores)
+function extrairValor(line) {
+  const matches = line.match(/\d{1,3}(?:\.\d{3})*,\d{2}/g);
+  if (!matches) return null;
+
+  // Se tiver 2 valores, geralmente o primeiro é transação e o segundo é saldo
+  const valorStr = matches.length === 1 ? matches[0] : matches[0];
+  const valor = parseFloat(valorStr.replace(/\./g, "").replace(",", "."));
+  return valor;
 }
 
 /* ============================================================
-🧩 Parser Universal
+🧩 Parser Universal aprimorado
 ============================================================ */
-
 export async function parseExtratoUniversal(filePath, mimetype = "application/pdf") {
   let text = "";
 
-  // 🔹 1. Ler o arquivo conforme o tipo
+  // 1️⃣ Ler o arquivo (PDF, XLSX, CSV)
   if (mimetype === "application/pdf") {
     const buffer = fs.readFileSync(filePath);
     const pdfData = await pdf(buffer);
@@ -76,40 +98,47 @@ export async function parseExtratoUniversal(filePath, mimetype = "application/pd
     text = fs.readFileSync(filePath, "utf8");
   }
 
-  // 🔹 2. Detectar o banco
   const banco = detectarBanco(text);
   console.log(`🏦 Banco detectado: ${banco}`);
 
-  // 🔹 3. Quebrar em linhas
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  // 2️⃣ Quebrar em linhas e limpar
+  const lines = text.split("\n").map((l) => limparTexto(l)).filter(Boolean);
 
   const transacoes = [];
   let currentDate = null;
 
-  // 🔹 4. Ler linha por linha procurando datas e valores
+  // 3️⃣ Processar linha a linha
   for (const line of lines) {
+    // Detectar data
     const dataMatch = line.match(/\b(\d{2}\/\d{2}\/\d{2,4})\b/);
     if (dataMatch) currentDate = normalizarData(dataMatch[1]);
 
-    const valor = parseValor(line);
-    if (valor !== null && currentDate) {
+    // Detectar valor
+    const valor = extrairValor(line);
+    if (valor !== null) {
+      const tipo = detectarTipoLinha(line) || (line.includes("-") ? "saida" : "entrada");
+
       const descricao = line
         .replace(dataMatch?.[1] || "", "")
-        .replace(/(\d{1,3}(?:\.\d{3})*,\d{2})/, "")
+        .replace(/\d{1,3}(?:\.\d{3})*,\d{2}/g, "")
         .trim();
 
-      const tipo = detectarTipo(line, valor);
-
       transacoes.push({
-        data: currentDate,
+        data: currentDate || new Date().toISOString().split("T")[0],
         descricao: descricao || "Transação",
-        valor: Math.abs(valor),
+        valor: valor,
         tipo,
-        categoria: null,
       });
     }
   }
 
-  // 🔹 5. Retornar resultados
-  return { banco, transacoes };
+  // 4️⃣ Remover duplicadas / linhas inválidas
+  const filtradas = transacoes.filter(
+    (t, i, arr) =>
+      t.data &&
+      !isNaN(t.valor) &&
+      arr.findIndex((x) => x.data === t.data && x.descricao === t.descricao && x.valor === t.valor) === i
+  );
+
+  return { banco, transacoes: filtradas };
 }
