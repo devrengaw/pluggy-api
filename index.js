@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA completa + fallback regex + logs detalhados)
+🧠 ANALISAR EXTRATO (IA adaptativa + detecção de banco + fallback regex)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -87,26 +87,49 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       return res.status(400).json({ success: false, message: "Não foi possível ler o extrato." });
     }
 
-    console.log(`📄 Texto extraído do extrato: ${textoExtraido.length} caracteres.`);
-    console.log("🤖 Enviando para IA...");
+    console.log(`📄 Texto extraído: ${textoExtraido.length} caracteres`);
 
-    // 2️⃣ Enviar o extrato inteiro para a IA
+    // 2️⃣ Detectar o banco automaticamente
+    function detectarBanco(texto) {
+      const lower = texto.toLowerCase();
+      if (lower.includes("bradesco")) return "Bradesco";
+      if (lower.includes("itaú") || lower.includes("itau")) return "Itaú";
+      if (lower.includes("santander")) return "Santander";
+      if (lower.includes("nubank")) return "Nubank";
+      if (lower.includes("inter")) return "Inter";
+      if (lower.includes("caixa")) return "Caixa";
+      if (lower.includes("banco do brasil") || lower.includes("banco do brasil s.a.")) return "Banco do Brasil";
+      return "Banco Desconhecido";
+    }
+
+    const bancoDetectado = detectarBanco(textoExtraido);
+    console.log(`🏦 Banco detectado: ${bancoDetectado}`);
+
+    // 3️⃣ Montar o prompt adaptativo
     const prompt = `
-Você é um analista financeiro.
-A seguir está o conteúdo de um extrato bancário.
-Extraia TODAS as transações reais, ignorando cabeçalhos, totais e saldos.
+Você é um analista financeiro especializado em leitura de extratos bancários do banco **${bancoDetectado}**.
+Analise cuidadosamente o conteúdo abaixo e extraia TODAS as transações reais (créditos e débitos), ignorando cabeçalhos, totais, saldos e repetições.
 
 Responda SOMENTE com JSON válido no formato:
 [
   {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
 ]
 
-Caso não encontre nenhuma transação, devolva um array vazio: [].
+Regras específicas:
+- Use o padrão de data encontrado no extrato (${bancoDetectado} geralmente usa DD/MM/AAAA).
+- Se o valor estiver com vírgula, converta para ponto (ex: "1.200,50" → 1200.50).
+- Não inclua linhas de “Saldo Anterior”, “Saldo Atual”, “Total do Mês” ou similares.
+- Classifique como "entrada" se for crédito, depósito, recebimento, PIX recebido, estorno.
+- Classifique como "saida" se for pagamento, compra, tarifa, PIX enviado, débito.
+- Caso não encontre transações, devolva um array vazio: [].
 
 Extrato:
 """${textoExtraido.slice(0, 50000)}"""
 `;
 
+    console.log("🤖 Enviando extrato completo para IA...");
+
+    // 4️⃣ Enviar para IA
     const ai = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
@@ -123,12 +146,12 @@ Extrato:
     try {
       transacoesIA = JSON.parse(raw);
     } catch (err) {
-      console.warn("⚠️ Falha ao interpretar resposta da IA:", err.message);
+      console.warn("⚠️ Falha ao interpretar JSON da IA:", err.message);
     }
 
-    console.log(`📊 IA detectou ${transacoesIA.length || 0} transações iniciais.`);
+    console.log(`📊 IA (${bancoDetectado}) detectou ${transacoesIA.length || 0} transações.`);
 
-    // 3️⃣ Fallback local via regex (caso a IA tenha ignorado linhas)
+    // 5️⃣ Fallback local via regex (caso a IA ignore algumas linhas)
     if (!transacoesIA.length) {
       console.log("⚙️ IA retornou vazio — aplicando fallback regex local...");
       const linhas = textoExtraido.split("\n").filter((l) => /\d{2}\/\d{2}\/\d{2,4}/.test(l));
@@ -151,10 +174,10 @@ Extrato:
       }
 
       transacoesIA = transacoesRegex;
-      console.log(`📊 Fallback detectou ${transacoesRegex.length} transações.`);
+      console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações.`);
     }
 
-    // 4️⃣ Limpeza e deduplicação
+    // 6️⃣ Limpeza e deduplicação
     const unicas = (transacoesIA || []).filter(
       (t, idx, arr) =>
         t.data &&
@@ -167,11 +190,13 @@ Extrato:
         ) === idx
     );
 
-    console.log(`✅ Total final consolidado: ${unicas.length} transações.`);
+    console.log(`✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`);
 
+    // 7️⃣ Retornar resultado
     return res.json({
       success: true,
       user_id,
+      banco: bancoDetectado,
       count: unicas.length,
       transacoes: unicas,
     });
@@ -185,34 +210,6 @@ Extrato:
   }
 });
 
-    // 4️⃣ Remover duplicadas
-    const unicas = todasTransacoes.filter(
-      (t, idx, arr) =>
-        arr.findIndex(
-          (x) =>
-            x.data === t.data &&
-            x.descricao === t.descricao &&
-            Number(x.valor) === Number(t.valor)
-        ) === idx
-    );
-
-    console.log(`✅ Total consolidado: ${unicas.length} transações.`);
-
-    return res.json({
-      success: true,
-      user_id,
-      count: unicas.length,
-      transacoes: unicas,
-    });
-  } catch (err) {
-    console.error("💥 Erro IA:", err);
-    res.status(500).json({
-      success: false,
-      message: "Erro interno ao analisar extrato.",
-      error: err.message,
-    });
-  }
-});
 
 /* ============================================================
 💾 CONFIRMAR EXTRATO — salvar aprovações no Supabase
