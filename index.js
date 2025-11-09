@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA adaptativa + detecção de banco + chunks + fallback)
+🧠 ANALISAR EXTRATO (IA adaptativa + OCR automático + logs detalhados)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -65,6 +65,16 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
       textoExtraido = pdfData.text;
+
+      // OCR automático se o texto for insuficiente
+      if (!textoExtraido || textoExtraido.trim().length < 1000) {
+        console.log("⚠️ Texto insuficiente, aplicando OCR...");
+        const { createWorker } = await import("tesseract.js");
+        const worker = await createWorker("por");
+        const { data } = await worker.recognize(buffer);
+        textoExtraido = data.text;
+        await worker.terminate();
+      }
     } else if (mimetype.startsWith("image/")) {
       const { createWorker } = await import("tesseract.js");
       const worker = await createWorker("por");
@@ -73,7 +83,8 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       await worker.terminate();
     } else if (
       mimetype === "application/vnd.ms-excel" ||
-      mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      mimetype ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ) {
       const workbook = XLSX.readFile(filePath);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -84,10 +95,14 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
 
     fs.unlinkSync(filePath);
     if (!textoExtraido || textoExtraido.trim().length < 50) {
-      return res.status(400).json({ success: false, message: "Não foi possível ler o extrato." });
+      return res.status(400).json({
+        success: false,
+        message: "Não foi possível ler o extrato. Verifique se o PDF está legível.",
+      });
     }
 
     console.log(`📄 Texto extraído: ${textoExtraido.length} caracteres`);
+    console.log("📜 Amostra do texto extraído:\n", textoExtraido.slice(0, 600));
 
     // 2️⃣ Detectar o banco automaticamente
     function detectarBanco(texto) {
@@ -105,10 +120,10 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     const bancoDetectado = detectarBanco(textoExtraido);
     console.log(`🏦 Banco detectado: ${bancoDetectado}`);
 
-    // 3️⃣ Dividir o texto em blocos de até 10k caracteres
+    // 3️⃣ Dividir o texto em blocos de até 15k caracteres
     const blocos = [];
-    for (let i = 0; i < textoExtraido.length; i += 10000) {
-      blocos.push(textoExtraido.slice(i, i + 10000));
+    for (let i = 0; i < textoExtraido.length; i += 15000) {
+      blocos.push(textoExtraido.slice(i, i + 15000));
     }
     console.log(`🧩 Extrato dividido em ${blocos.length} blocos.`);
 
@@ -123,7 +138,7 @@ Você é um analista financeiro especialista em extratos do banco **${bancoDetec
 Analise o conteúdo abaixo e extraia todas as transações reais (créditos e débitos).
 Ignore cabeçalhos, totais e saldos.
 
-Responda SOMENTE com JSON no formato:
+Responda SOMENTE com JSON válido:
 [
   {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
 ]
@@ -136,13 +151,14 @@ Extrato:
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
         temperature: 0,
-        top_p: 1,
       });
 
       let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
       const jsonStart = raw.indexOf("[");
       const jsonEnd = raw.lastIndexOf("]");
       if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+
+      console.log("🧩 Resposta bruta IA:", raw.slice(0, 400));
 
       try {
         const parsed = JSON.parse(raw);
@@ -155,11 +171,11 @@ Extrato:
     console.log(`📊 IA (${bancoDetectado}) detectou ${transacoesIA.length || 0} transações.`);
 
     // 5️⃣ Fallback local via regex (garantia)
-    const linhas = textoExtraido.split("\n").filter((l) => /\d{2}\/\d{2}\/\d{2,4}/.test(l));
+    const linhas = textoExtraido.split("\n").filter((l) => /\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/.test(l));
     const transacoesRegex = [];
 
     for (const linha of linhas) {
-      const dataMatch = linha.match(/\d{2}\/\d{2}\/\d{2,4}/);
+      const dataMatch = linha.match(/\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/);
       const valoresPossiveis = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
       if (!dataMatch || !valoresPossiveis) continue;
 
@@ -167,7 +183,9 @@ Extrato:
       const partes = valorBruto.split(",");
       if (partes[0].length > 8 || !/,/.test(valorBruto)) continue;
 
-      const valorNumerico = parseFloat(valorBruto.replace(/\./g, "").replace(",", ".").replace("-", ""));
+      const valorNumerico = parseFloat(
+        valorBruto.replace(/\./g, "").replace(",", ".").replace("-", "")
+      );
       if (isNaN(valorNumerico) || valorNumerico === 0) continue;
 
       const descricao = linha
