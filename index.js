@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (versão universal e segura — IA + OCR + Fallback)
+🧠 ANALISAR EXTRATO (IA + OCR + Categorias + Fallback universal)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -68,7 +68,7 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       const pdfData = await pdf(buffer);
       textoExtraido = pdfData.text;
 
-      // OCR automático se for imagem embutida (texto insuficiente)
+      // OCR automático se o texto for insuficiente
       if (!textoExtraido || textoExtraido.trim().length < 1000) {
         console.log("⚠️ Texto insuficiente — aplicando OCR automático...");
         const { createWorker } = await import("tesseract.js");
@@ -85,8 +85,7 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       await worker.terminate();
     } else if (
       mimetype === "application/vnd.ms-excel" ||
-      mimetype ===
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ) {
       const workbook = XLSX.readFile(filePath);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -96,7 +95,6 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     }
 
     fs.unlinkSync(filePath);
-
     if (!textoExtraido || textoExtraido.trim().length < 50) {
       return res.status(400).json({
         success: false,
@@ -108,7 +106,7 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     console.log(`📄 Texto extraído com ${textoExtraido.length} caracteres`);
 
     /* ============================================================
-    2️⃣ DETECÇÃO DO BANCO (para adaptar prompt)
+    2️⃣ DETECÇÃO DO BANCO (para adaptar o prompt)
     ============================================================ */
     function detectarBanco(texto) {
       const lower = texto.toLowerCase();
@@ -135,7 +133,7 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     console.log(`🧩 Extrato dividido em ${blocos.length} blocos.`);
 
     /* ============================================================
-    4️⃣ PROCESSAMENTO COM IA — BLOCO A BLOCO
+    4️⃣ PROCESSAMENTO COM IA — BLOCO A BLOCO (com categorias)
     ============================================================ */
     let transacoesIA = [];
 
@@ -143,27 +141,41 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       console.log(`🤖 IA analisando bloco ${i + 1}/${blocos.length}...`);
 
       const prompt = `
-Você é um analista financeiro altamente especializado em leitura de extratos bancários brasileiros.
+Você é um analista financeiro altamente especializado em leitura e categorização de extratos bancários brasileiros.
 A seguir está o conteúdo bruto de um extrato do banco **${bancoDetectado}**.
 
-Extraia TODAS as transações reais (créditos e débitos), ignorando:
-- Cabeçalhos (Data, Histórico, Docto, Valor, etc.)
-- Totais e Saldos ("Saldo Anterior", "Saldo Atual", "Total do Mês")
-- Linhas incompletas ou repetições.
+Extraia TODAS as transações reais (créditos e débitos), e para cada uma determine:
+- Data (DD/MM/AAAA)
+- Descrição
+- Valor (decimal: 1234.56)
+- Tipo ("entrada" ou "saida")
+- Categoria adequada (baseada na descrição)
 
-Regras:
-- Use formato de data DD/MM/AAAA.
-- O valor da transação é SEMPRE o último número com vírgula na linha.
-- Ignore números da coluna "Docto" e "Saldo".
-- Converta valores para formato decimal (1.234,56 → 1234.56).
+⚙️ Regras:
+- Ignore cabeçalhos ("Data", "Histórico", "Docto", "Valor", etc.)
+- Ignore totais e saldos ("Saldo Anterior", "Saldo Atual", "Total do Mês")
+- Ignore colunas "Docto" e "Saldo" (não são valores)
+- O valor correto é sempre o último número com vírgula na linha.
 - Classifique:
   - "entrada" → crédito, depósito, pix recebido, estorno, salário, transferência recebida
   - "saida" → pagamento, pix enviado, compra, débito, tarifa, saque, transferência enviada
-- Se não houver transações, devolva um array vazio.
+- Categorias:
+  - "Alimentação 🍽️" → mercado, supermercado, padaria, restaurante
+  - "Transporte 🚗" → posto, combustível, uber, 99, locadora
+  - "Moradia 🏠" → aluguel, condomínio, energia, água, gás
+  - "Lazer 🎬" → netflix, spotify, cinema, viagem, bar
+  - "Saúde ❤️" → farmácia, hospital, médico, consulta
+  - "Educação 🎓" → escola, faculdade, curso, mensalidade
+  - "Serviços 📱" → celular, internet, telefone, assinatura, plano
+  - "Investimentos 📈" → investimento, aplicação, corretora, cdb
+  - "Renda 💰" → para todas as entradas (salário, pix recebido, depósito)
+  - "Outros 💼" → quando não se encaixar
+- Mantenha as datas no formato DD/MM/AAAA.
+- Mantenha apenas JSON válido, sem texto adicional.
 
-Responda SOMENTE com JSON válido:
+Responda SOMENTE com JSON:
 [
-  {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
+  {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"texto"}
 ]
 
 Extrato:
@@ -194,7 +206,7 @@ Extrato:
     );
 
     /* ============================================================
-    5️⃣ FALLBACK LOCAL — REGEX (garantia total)
+    5️⃣ FALLBACK LOCAL (Regex de segurança)
     ============================================================ */
     const linhas = textoExtraido
       .split("\n")
@@ -207,10 +219,7 @@ Extrato:
       const valoresPossiveis = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
       if (!dataMatch || !valoresPossiveis) continue;
 
-      // Selecionar último número (valor da transação)
       const valorBruto = valoresPossiveis[valoresPossiveis.length - 1];
-
-      // Evitar colunas "Docto" (muito longas ou sem vírgula)
       const partes = valorBruto.split(",");
       if (partes[0].length > 8 || !/,/.test(valorBruto)) continue;
 
@@ -219,7 +228,6 @@ Extrato:
       );
       if (isNaN(valorNumerico) || valorNumerico === 0) continue;
 
-      // Limpeza da descrição
       const descricao = linha
         .replace(dataMatch[0], "")
         .replace(valorBruto, "")
@@ -231,17 +239,19 @@ Extrato:
         descricao,
         valor: valorNumerico,
         tipo: /cred|dep|receb|pix/i.test(linha) ? "entrada" : "saida",
+        categoria: /cred|dep|receb|pix/i.test(linha)
+          ? "Renda 💰"
+          : "Outros 💼",
       });
     }
 
     console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações.`);
 
     /* ============================================================
-    6️⃣ COMBINAÇÃO E LIMPEZA FINAL
+    6️⃣ COMBINAÇÃO, LIMPEZA E DEDUPLICAÇÃO FINAL
     ============================================================ */
     const combinadas = [...transacoesIA, ...transacoesRegex];
 
-    // Deduplicação (data + descrição + valor)
     const unicas = combinadas.filter(
       (t, idx, arr) =>
         t.data &&
@@ -259,7 +269,7 @@ Extrato:
     );
 
     /* ============================================================
-    7️⃣ RESPOSTA FINAL
+    7️⃣ RETORNO FINAL
     ============================================================ */
     return res.json({
       success: true,
@@ -277,8 +287,6 @@ Extrato:
     });
   }
 });
-
-
 
 /* ============================================================
 💾 CONFIRMAR EXTRATO — salvar aprovações no Supabase
