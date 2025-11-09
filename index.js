@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA adaptativa + OCR automático + logs detalhados)
+🧠 ANALISAR EXTRATO (versão universal e segura — IA + OCR + Fallback)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -60,15 +60,17 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     const mimetype = req.file.mimetype;
     let textoExtraido = "";
 
-    // 1️⃣ Ler o arquivo conforme tipo
+    /* ============================================================
+    1️⃣ LEITURA DO ARQUIVO (PDF, Imagem, Excel ou Texto)
+    ============================================================ */
     if (mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
       textoExtraido = pdfData.text;
 
-      // OCR automático se o texto for insuficiente
+      // OCR automático se for imagem embutida (texto insuficiente)
       if (!textoExtraido || textoExtraido.trim().length < 1000) {
-        console.log("⚠️ Texto insuficiente, aplicando OCR...");
+        console.log("⚠️ Texto insuficiente — aplicando OCR automático...");
         const { createWorker } = await import("tesseract.js");
         const worker = await createWorker("por");
         const { data } = await worker.recognize(buffer);
@@ -94,17 +96,20 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     }
 
     fs.unlinkSync(filePath);
+
     if (!textoExtraido || textoExtraido.trim().length < 50) {
       return res.status(400).json({
         success: false,
-        message: "Não foi possível ler o extrato. Verifique se o PDF está legível.",
+        message:
+          "Não foi possível ler o extrato. Verifique se o arquivo está legível.",
       });
     }
 
-    console.log(`📄 Texto extraído: ${textoExtraido.length} caracteres`);
-    console.log("📜 Amostra do texto extraído:\n", textoExtraido.slice(0, 600));
+    console.log(`📄 Texto extraído com ${textoExtraido.length} caracteres`);
 
-    // 2️⃣ Detectar o banco automaticamente
+    /* ============================================================
+    2️⃣ DETECÇÃO DO BANCO (para adaptar prompt)
+    ============================================================ */
     function detectarBanco(texto) {
       const lower = texto.toLowerCase();
       if (lower.includes("bradesco")) return "Bradesco";
@@ -120,23 +125,41 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     const bancoDetectado = detectarBanco(textoExtraido);
     console.log(`🏦 Banco detectado: ${bancoDetectado}`);
 
-    // 3️⃣ Dividir o texto em blocos de até 15k caracteres
+    /* ============================================================
+    3️⃣ DIVISÃO EM BLOCOS (para extratos longos)
+    ============================================================ */
     const blocos = [];
     for (let i = 0; i < textoExtraido.length; i += 15000) {
       blocos.push(textoExtraido.slice(i, i + 15000));
     }
     console.log(`🧩 Extrato dividido em ${blocos.length} blocos.`);
 
-    // 4️⃣ Processar cada bloco com IA
+    /* ============================================================
+    4️⃣ PROCESSAMENTO COM IA — BLOCO A BLOCO
+    ============================================================ */
     let transacoesIA = [];
 
     for (let i = 0; i < blocos.length; i++) {
       console.log(`🤖 IA analisando bloco ${i + 1}/${blocos.length}...`);
 
       const prompt = `
-Você é um analista financeiro especialista em extratos do banco **${bancoDetectado}**.
-Analise o conteúdo abaixo e extraia todas as transações reais (créditos e débitos).
-Ignore cabeçalhos, totais e saldos.
+Você é um analista financeiro altamente especializado em leitura de extratos bancários brasileiros.
+A seguir está o conteúdo bruto de um extrato do banco **${bancoDetectado}**.
+
+Extraia TODAS as transações reais (créditos e débitos), ignorando:
+- Cabeçalhos (Data, Histórico, Docto, Valor, etc.)
+- Totais e Saldos ("Saldo Anterior", "Saldo Atual", "Total do Mês")
+- Linhas incompletas ou repetições.
+
+Regras:
+- Use formato de data DD/MM/AAAA.
+- O valor da transação é SEMPRE o último número com vírgula na linha.
+- Ignore números da coluna "Docto" e "Saldo".
+- Converta valores para formato decimal (1.234,56 → 1234.56).
+- Classifique:
+  - "entrada" → crédito, depósito, pix recebido, estorno, salário, transferência recebida
+  - "saida" → pagamento, pix enviado, compra, débito, tarifa, saque, transferência enviada
+- Se não houver transações, devolva um array vazio.
 
 Responda SOMENTE com JSON válido:
 [
@@ -158,8 +181,6 @@ Extrato:
       const jsonEnd = raw.lastIndexOf("]");
       if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
 
-      console.log("🧩 Resposta bruta IA:", raw.slice(0, 400));
-
       try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) transacoesIA.push(...parsed);
@@ -168,10 +189,17 @@ Extrato:
       }
     }
 
-    console.log(`📊 IA (${bancoDetectado}) detectou ${transacoesIA.length || 0} transações.`);
+    console.log(
+      `📊 IA (${bancoDetectado}) detectou ${transacoesIA.length} transações.`
+    );
 
-    // 5️⃣ Fallback local via regex (garantia)
-    const linhas = textoExtraido.split("\n").filter((l) => /\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/.test(l));
+    /* ============================================================
+    5️⃣ FALLBACK LOCAL — REGEX (garantia total)
+    ============================================================ */
+    const linhas = textoExtraido
+      .split("\n")
+      .filter((l) => /\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/.test(l));
+
     const transacoesRegex = [];
 
     for (const linha of linhas) {
@@ -179,7 +207,10 @@ Extrato:
       const valoresPossiveis = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
       if (!dataMatch || !valoresPossiveis) continue;
 
+      // Selecionar último número (valor da transação)
       const valorBruto = valoresPossiveis[valoresPossiveis.length - 1];
+
+      // Evitar colunas "Docto" (muito longas ou sem vírgula)
       const partes = valorBruto.split(",");
       if (partes[0].length > 8 || !/,/.test(valorBruto)) continue;
 
@@ -188,6 +219,7 @@ Extrato:
       );
       if (isNaN(valorNumerico) || valorNumerico === 0) continue;
 
+      // Limpeza da descrição
       const descricao = linha
         .replace(dataMatch[0], "")
         .replace(valorBruto, "")
@@ -204,10 +236,12 @@ Extrato:
 
     console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações.`);
 
-    // 6️⃣ Combinar IA + fallback
+    /* ============================================================
+    6️⃣ COMBINAÇÃO E LIMPEZA FINAL
+    ============================================================ */
     const combinadas = [...transacoesIA, ...transacoesRegex];
 
-    // 7️⃣ Deduplicar
+    // Deduplicação (data + descrição + valor)
     const unicas = combinadas.filter(
       (t, idx, arr) =>
         t.data &&
@@ -220,9 +254,13 @@ Extrato:
         ) === idx
     );
 
-    console.log(`✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`);
+    console.log(
+      `✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`
+    );
 
-    // 8️⃣ Retornar
+    /* ============================================================
+    7️⃣ RESPOSTA FINAL
+    ============================================================ */
     return res.json({
       success: true,
       user_id,
@@ -239,6 +277,7 @@ Extrato:
     });
   }
 });
+
 
 
 /* ============================================================
