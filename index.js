@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA adaptativa + detecção de banco + fallback regex)
+🧠 ANALISAR EXTRATO (IA adaptativa + detecção de banco + chunks + fallback)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -98,87 +98,99 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       if (lower.includes("nubank")) return "Nubank";
       if (lower.includes("inter")) return "Inter";
       if (lower.includes("caixa")) return "Caixa";
-      if (lower.includes("banco do brasil") || lower.includes("banco do brasil s.a.")) return "Banco do Brasil";
+      if (lower.includes("banco do brasil")) return "Banco do Brasil";
       return "Banco Desconhecido";
     }
 
     const bancoDetectado = detectarBanco(textoExtraido);
     console.log(`🏦 Banco detectado: ${bancoDetectado}`);
 
-    // 3️⃣ Montar o prompt adaptativo
-    const prompt = `
-Você é um analista financeiro especializado em leitura de extratos bancários do banco **${bancoDetectado}**.
-Analise cuidadosamente o conteúdo abaixo e extraia TODAS as transações reais (créditos e débitos), ignorando cabeçalhos, totais, saldos e repetições.
+    // 3️⃣ Dividir o texto em blocos de até 10k caracteres
+    const blocos = [];
+    for (let i = 0; i < textoExtraido.length; i += 10000) {
+      blocos.push(textoExtraido.slice(i, i + 10000));
+    }
+    console.log(`🧩 Extrato dividido em ${blocos.length} blocos.`);
 
-Responda SOMENTE com JSON válido no formato:
+    // 4️⃣ Processar cada bloco com IA
+    let transacoesIA = [];
+
+    for (let i = 0; i < blocos.length; i++) {
+      console.log(`🤖 IA analisando bloco ${i + 1}/${blocos.length}...`);
+
+      const prompt = `
+Você é um analista financeiro especialista em extratos do banco **${bancoDetectado}**.
+Analise o conteúdo abaixo e extraia todas as transações reais (créditos e débitos).
+Ignore cabeçalhos, totais e saldos.
+
+Responda SOMENTE com JSON no formato:
 [
   {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
 ]
 
-Regras específicas:
-- Use o padrão de data encontrado no extrato (${bancoDetectado} geralmente usa DD/MM/AAAA).
-- Se o valor estiver com vírgula, converta para ponto (ex: "1.200,50" → 1200.50).
-- Não inclua linhas de “Saldo Anterior”, “Saldo Atual”, “Total do Mês” ou similares.
-- Classifique como "entrada" se for crédito, depósito, recebimento, PIX recebido, estorno.
-- Classifique como "saida" se for pagamento, compra, tarifa, PIX enviado, débito.
-- Caso não encontre transações, devolva um array vazio: [].
-
 Extrato:
-"""${textoExtraido.slice(0, 50000)}"""
+"""${blocos[i]}"""
 `;
 
-    console.log("🤖 Enviando extrato completo para IA...");
+      const ai = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+        top_p: 1,
+      });
 
-    // 4️⃣ Enviar para IA
-    const ai = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0,
-      top_p: 1,
-    });
+      let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
+      const jsonStart = raw.indexOf("[");
+      const jsonEnd = raw.lastIndexOf("]");
+      if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
 
-    let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
-    const jsonStart = raw.indexOf("[");
-    const jsonEnd = raw.lastIndexOf("]");
-    if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
-
-    let transacoesIA = [];
-    try {
-      transacoesIA = JSON.parse(raw);
-    } catch (err) {
-      console.warn("⚠️ Falha ao interpretar JSON da IA:", err.message);
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) transacoesIA.push(...parsed);
+      } catch (err) {
+        console.warn(`⚠️ Erro ao interpretar bloco ${i + 1}:`, err.message);
+      }
     }
 
     console.log(`📊 IA (${bancoDetectado}) detectou ${transacoesIA.length || 0} transações.`);
 
-    // 5️⃣ Fallback local via regex (caso a IA ignore algumas linhas)
-    if (!transacoesIA.length) {
-      console.log("⚙️ IA retornou vazio — aplicando fallback regex local...");
-      const linhas = textoExtraido.split("\n").filter((l) => /\d{2}\/\d{2}\/\d{2,4}/.test(l));
-      const transacoesRegex = [];
+    // 5️⃣ Fallback local via regex (garantia)
+    const linhas = textoExtraido.split("\n").filter((l) => /\d{2}\/\d{2}\/\d{2,4}/.test(l));
+    const transacoesRegex = [];
 
-      for (const linha of linhas) {
-        const dataMatch = linha.match(/\d{2}\/\d{2}\/\d{2,4}/);
-        const valorMatch = linha.match(/\d{1,3}(?:\.\d{3})*,\d{2}/);
-        if (dataMatch && valorMatch) {
-          transacoesRegex.push({
-            data: dataMatch[0],
-            descricao: linha
-              .replace(dataMatch[0], "")
-              .replace(valorMatch[0], "")
-              .trim(),
-            valor: parseFloat(valorMatch[0].replace(/\./g, "").replace(",", ".")),
-            tipo: /cred|dep|receb/i.test(linha) ? "entrada" : "saida",
-          });
-        }
-      }
+    for (const linha of linhas) {
+      const dataMatch = linha.match(/\d{2}\/\d{2}\/\d{2,4}/);
+      const valoresPossiveis = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
+      if (!dataMatch || !valoresPossiveis) continue;
 
-      transacoesIA = transacoesRegex;
-      console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações.`);
+      const valorBruto = valoresPossiveis[valoresPossiveis.length - 1];
+      const partes = valorBruto.split(",");
+      if (partes[0].length > 8 || !/,/.test(valorBruto)) continue;
+
+      const valorNumerico = parseFloat(valorBruto.replace(/\./g, "").replace(",", ".").replace("-", ""));
+      if (isNaN(valorNumerico) || valorNumerico === 0) continue;
+
+      const descricao = linha
+        .replace(dataMatch[0], "")
+        .replace(valorBruto, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+
+      transacoesRegex.push({
+        data: dataMatch[0],
+        descricao,
+        valor: valorNumerico,
+        tipo: /cred|dep|receb|pix/i.test(linha) ? "entrada" : "saida",
+      });
     }
 
-    // 6️⃣ Limpeza e deduplicação
-    const unicas = (transacoesIA || []).filter(
+    console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações.`);
+
+    // 6️⃣ Combinar IA + fallback
+    const combinadas = [...transacoesIA, ...transacoesRegex];
+
+    // 7️⃣ Deduplicar
+    const unicas = combinadas.filter(
       (t, idx, arr) =>
         t.data &&
         !isNaN(t.valor) &&
@@ -192,7 +204,7 @@ Extrato:
 
     console.log(`✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`);
 
-    // 7️⃣ Retornar resultado
+    // 8️⃣ Retornar
     return res.json({
       success: true,
       user_id,
@@ -209,6 +221,7 @@ Extrato:
     });
   }
 });
+
 
 /* ============================================================
 💾 CONFIRMAR EXTRATO — salvar aprovações no Supabase
