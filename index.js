@@ -46,6 +46,129 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage });
+/* ============================================================
+🧠 ANALISAR EXTRATO (IA + OCR opcional)
+============================================================ */
+app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    if (!req.file?.path) return res.status(400).json({ success: false, message: "Arquivo não recebido." });
+
+    const filePath = req.file.path;
+    const mimetype = req.file.mimetype;
+
+    let textoExtraido = "";
+
+    // 1️⃣ Ler o arquivo conforme o tipo
+    if (mimetype === "application/pdf") {
+      const buffer = fs.readFileSync(filePath);
+      const pdfData = await pdf(buffer);
+      textoExtraido = pdfData.text;
+    } else if (mimetype.startsWith("image/")) {
+      // OCR (imagem)
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("por");
+      const { data } = await worker.recognize(filePath);
+      textoExtraido = data.text;
+      await worker.terminate();
+    } else if (
+      mimetype === "application/vnd.ms-excel" ||
+      mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ) {
+      const workbook = XLSX.readFile(filePath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      textoExtraido = XLSX.utils.sheet_to_csv(sheet);
+    } else {
+      textoExtraido = fs.readFileSync(filePath, "utf8");
+    }
+
+    // 2️⃣ Enviar para IA interpretar
+    const prompt = `
+    Você é um analista financeiro.
+    A seguir está o conteúdo de um extrato bancário. Extraia todas as transações
+    e devolva apenas JSON com o formato:
+
+    [
+      {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
+    ]
+
+    Extraia apenas linhas reais de transações, ignorando cabeçalhos e saldos.
+    Extrato:
+    ${textoExtraido.slice(0, 4000)}
+    `;
+
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+    });
+
+    let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
+    const jsonStart = raw.indexOf("[");
+    const jsonEnd = raw.lastIndexOf("]");
+    if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+
+    let transacoes = [];
+    try {
+      transacoes = JSON.parse(raw);
+    } catch (err) {
+      console.error("❌ Falha ao interpretar IA:", err.message);
+      return res.status(500).json({ success: false, message: "Erro ao interpretar IA." });
+    }
+
+    fs.unlinkSync(filePath);
+
+    return res.json({
+      success: true,
+      user_id,
+      count: transacoes.length,
+      transacoes,
+    });
+  } catch (err) {
+    console.error("💥 Erro IA:", err);
+    res.status(500).json({
+      success: false,
+      message: "Erro interno ao analisar extrato.",
+      error: err.message,
+    });
+  }
+});
+/* ============================================================
+💾 CONFIRMAR EXTRATO — salvar aprovações no Supabase
+============================================================ */
+app.post("/confirmar-extrato", async (req, res) => {
+  try {
+    const { user_id, transacoes } = req.body;
+
+    if (!user_id || !Array.isArray(transacoes))
+      return res.status(400).json({ success: false, message: "Dados inválidos." });
+
+    const payload = transacoes.map((t) => ({
+      user_id,
+      descricao: t.descricao || "",
+      valor: Number(t.valor) || 0,
+      tipo: t.tipo === "entrada" ? "entrada" : "saida",
+      categoria: t.categoria || null,
+      data: normalizarData(t.data),
+      criado_em: new Date(),
+    }));
+
+    const { error } = await supabase.from("transacoes").insert(payload);
+    if (error) throw error;
+
+    return res.json({
+      success: true,
+      message: `✅ ${payload.length} transações salvas com sucesso.`,
+    });
+  } catch (err) {
+    console.error("💥 Erro ao confirmar extrato:", err);
+    res.status(500).json({
+      success: false,
+      message: "Erro ao confirmar extrato.",
+      error: err.message,
+    });
+  }
+});
 
 // ============================================================
 // 🧠 Função auxiliar — normaliza data DD/MM/AA → YYYY-MM-DD
