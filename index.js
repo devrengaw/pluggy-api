@@ -46,26 +46,27 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage });
+
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA + OCR opcional)
+🧠 ANALISAR EXTRATO (IA com chunking + feedback dinâmico)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
     const { user_id } = req.body;
-    if (!req.file?.path) return res.status(400).json({ success: false, message: "Arquivo não recebido." });
+    if (!req.file?.path)
+      return res.status(400).json({ success: false, message: "Arquivo não recebido." });
 
     const filePath = req.file.path;
     const mimetype = req.file.mimetype;
 
     let textoExtraido = "";
 
-    // 1️⃣ Ler o arquivo conforme o tipo
+    // 1️⃣ Ler o arquivo conforme tipo
     if (mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
       textoExtraido = pdfData.text;
     } else if (mimetype.startsWith("image/")) {
-      // OCR (imagem)
       const { createWorker } = await import("tesseract.js");
       const worker = await createWorker("por");
       const { data } = await worker.recognize(filePath);
@@ -82,47 +83,69 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       textoExtraido = fs.readFileSync(filePath, "utf8");
     }
 
-    // 2️⃣ Enviar para IA interpretar
-    const prompt = `
-    Você é um analista financeiro.
-    A seguir está o conteúdo de um extrato bancário. Extraia todas as transações
-    e devolva apenas JSON com o formato:
+    // Remove o arquivo temporário
+    fs.unlinkSync(filePath);
 
-    [
-      {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
-    ]
-
-    Extraia apenas linhas reais de transações, ignorando cabeçalhos e saldos.
-    Extrato:
-    ${textoExtraido.slice(0, 4000)}
-    `;
-
-    const ai = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-    });
-
-    let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
-    const jsonStart = raw.indexOf("[");
-    const jsonEnd = raw.lastIndexOf("]");
-    if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
-
-    let transacoes = [];
-    try {
-      transacoes = JSON.parse(raw);
-    } catch (err) {
-      console.error("❌ Falha ao interpretar IA:", err.message);
-      return res.status(500).json({ success: false, message: "Erro ao interpretar IA." });
+    // 2️⃣ Dividir texto em partes de 3000 caracteres
+    const partes = [];
+    for (let i = 0; i < textoExtraido.length; i += 3000) {
+      partes.push(textoExtraido.slice(i, i + 3000));
     }
 
-    fs.unlinkSync(filePath);
+    console.log(`📄 Extrato dividido em ${partes.length} partes para análise IA.`);
+
+    let todasTransacoes = [];
+
+    // 3️⃣ Processar cada parte individualmente
+    for (let i = 0; i < partes.length; i++) {
+      console.log(`🤖 Analisando parte ${i + 1} de ${partes.length}...`);
+      const prompt = `
+      Você é um analista financeiro.
+      Extraia todas as transações reais do extrato bancário abaixo e devolva SOMENTE JSON no formato:
+      [
+        {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida"}
+      ]
+      Extrato:
+      ${partes[i]}
+      `;
+
+      const ai = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+      });
+
+      let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
+      const jsonStart = raw.indexOf("[");
+      const jsonEnd = raw.lastIndexOf("]");
+      if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+
+      try {
+        const trans = JSON.parse(raw);
+        todasTransacoes.push(...trans);
+      } catch (err) {
+        console.warn(`⚠️ Parte ${i + 1}: erro ao interpretar JSON`);
+      }
+    }
+
+    // 4️⃣ Remover duplicadas
+    const unicas = todasTransacoes.filter(
+      (t, idx, arr) =>
+        arr.findIndex(
+          (x) =>
+            x.data === t.data &&
+            x.descricao === t.descricao &&
+            Number(x.valor) === Number(t.valor)
+        ) === idx
+    );
+
+    console.log(`✅ Total consolidado: ${unicas.length} transações.`);
 
     return res.json({
       success: true,
       user_id,
-      count: transacoes.length,
-      transacoes,
+      count: unicas.length,
+      transacoes: unicas,
     });
   } catch (err) {
     console.error("💥 Erro IA:", err);
@@ -133,6 +156,7 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     });
   }
 });
+
 /* ============================================================
 💾 CONFIRMAR EXTRATO — salvar aprovações no Supabase
 ============================================================ */
