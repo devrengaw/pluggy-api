@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA adaptativa + fallback regex aprimorado)
+🧠 ANALISAR EXTRATO (IA adaptativa + detecção de banco + fallback regex)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -105,13 +105,10 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     const bancoDetectado = detectarBanco(textoExtraido);
     console.log(`🏦 Banco detectado: ${bancoDetectado}`);
 
-    // 3️⃣ Prompt adaptativo por banco
+    // 3️⃣ Montar o prompt adaptativo
     const prompt = `
 Você é um analista financeiro especializado em leitura de extratos bancários do banco **${bancoDetectado}**.
 Analise cuidadosamente o conteúdo abaixo e extraia TODAS as transações reais (créditos e débitos), ignorando cabeçalhos, totais, saldos e repetições.
-
-O arquivo pode conter colunas como "Data", "Histórico", "Docto" e "Valor".
-O número da coluna "Docto" NÃO é o valor da transação — o valor correto é o último número com vírgula na linha.
 
 Responda SOMENTE com JSON válido no formato:
 [
@@ -132,7 +129,7 @@ Extrato:
 
     console.log("🤖 Enviando extrato completo para IA...");
 
-    // 4️⃣ Chamada à IA
+    // 4️⃣ Enviar para IA
     const ai = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
@@ -154,50 +151,34 @@ Extrato:
 
     console.log(`📊 IA (${bancoDetectado}) detectou ${transacoesIA.length || 0} transações.`);
 
-    // 5️⃣ Fallback local via regex aprimorado
-    const linhas = textoExtraido.split("\n").filter((l) => /\d{2}\/\d{2}\/\d{2,4}/.test(l));
-    const transacoesRegex = [];
+    // 5️⃣ Fallback local via regex (caso a IA ignore algumas linhas)
+    if (!transacoesIA.length) {
+      console.log("⚙️ IA retornou vazio — aplicando fallback regex local...");
+      const linhas = textoExtraido.split("\n").filter((l) => /\d{2}\/\d{2}\/\d{2,4}/.test(l));
+      const transacoesRegex = [];
 
-    for (const linha of linhas) {
-      const dataMatch = linha.match(/\d{2}\/\d{2}\/\d{2,4}/);
+      for (const linha of linhas) {
+        const dataMatch = linha.match(/\d{2}\/\d{2}\/\d{2,4}/);
+        const valorMatch = linha.match(/\d{1,3}(?:\.\d{3})*,\d{2}/);
+        if (dataMatch && valorMatch) {
+          transacoesRegex.push({
+            data: dataMatch[0],
+            descricao: linha
+              .replace(dataMatch[0], "")
+              .replace(valorMatch[0], "")
+              .trim(),
+            valor: parseFloat(valorMatch[0].replace(/\./g, "").replace(",", ".")),
+            tipo: /cred|dep|receb/i.test(linha) ? "entrada" : "saida",
+          });
+        }
+      }
 
-      // 🧩 Captura todos os valores válidos (com vírgula decimal, aceita negativo e sem milhar)
-      const valoresPossiveis = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
-      if (!dataMatch || !valoresPossiveis) continue;
-
-      // O último número da linha é o valor da transação (evita Docto e Saldo)
-      const valorBruto = valoresPossiveis[valoresPossiveis.length - 1];
-
-      // Ignora números muito longos (provável "Docto")
-      const partes = valorBruto.split(",");
-      if (partes[0].length > 8 || !/,/.test(valorBruto)) continue;
-
-      const valorNumerico = parseFloat(
-        valorBruto.replace(/\./g, "").replace(",", ".").replace("-", "")
-      );
-      if (isNaN(valorNumerico) || valorNumerico === 0) continue;
-
-      const descricao = linha
-        .replace(dataMatch[0], "")
-        .replace(valorBruto, "")
-        .replace(/\s{2,}/g, " ")
-        .trim();
-
-      transacoesRegex.push({
-        data: dataMatch[0],
-        descricao,
-        valor: valorNumerico,
-        tipo: /cred|dep|receb|pix/i.test(linha) ? "entrada" : "saida",
-      });
+      transacoesIA = transacoesRegex;
+      console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações.`);
     }
 
-    console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações (filtro Docto aprimorado).`);
-
-    // 6️⃣ Combinar resultados IA + Regex
-    const combinadas = [...transacoesIA, ...transacoesRegex];
-
-    // 7️⃣ Deduplicação
-    const unicas = combinadas.filter(
+    // 6️⃣ Limpeza e deduplicação
+    const unicas = (transacoesIA || []).filter(
       (t, idx, arr) =>
         t.data &&
         !isNaN(t.valor) &&
@@ -211,7 +192,7 @@ Extrato:
 
     console.log(`✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`);
 
-    // 8️⃣ Resposta final
+    // 7️⃣ Retornar resultado
     return res.json({
       success: true,
       user_id,
