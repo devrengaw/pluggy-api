@@ -14,6 +14,8 @@ import fs from "fs";
 import pdf from "pdf-parse";
 import XLSX from "xlsx";
 import path from "path";
+import { parseExtratoUniversal } from "./services/pdfParserUniversal.js";
+
 
 // ============================================================
 // ⚙️ CONFIGURAÇÕES INICIAIS
@@ -45,30 +47,12 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-// ============================================================
-// 🧠 Função auxiliar — normaliza data DD/MM/AA → YYYY-MM-DD
-// ============================================================
-function normalizarData(dataBruta) {
-  if (!dataBruta) return new Date().toISOString().split("T")[0];
-  try {
-    const partes = dataBruta.trim().split("/");
-    if (partes.length === 3) {
-      let [dia, mes, ano] = partes.map((p) => p.padStart(2, "0"));
-      if (ano.length === 2) {
-        const anoNum = parseInt(ano, 10);
-        ano = anoNum < 50 ? `20${ano}` : `19${ano}`;
-      }
-      return `${ano}-${mes}-${dia}`;
-    }
-  } catch (err) {
-    console.warn("⚠️ Erro ao normalizar data:", dataBruta, err);
-  }
-  return new Date().toISOString().split("T")[0];
-}
 
 /* ============================================================
-📤 PROCESSAR EXTRATO (IA + SUPABASE) — versão final Render-safe
+📤 PROCESSAR EXTRATO (Universal Parser + IA + SUPABASE)
 ============================================================ */
+import { parseExtratoUniversal } from "./services/pdfParserUniversal.js"; // ⬅️ importe no topo do arquivo
+
 app.post("/processar-extrato", upload.single("file"), async (req, res) => {
   try {
     console.log("📥 Recebendo arquivo:", req.file?.originalname);
@@ -77,17 +61,21 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
 
     const { user_id } = req.body;
     if (!user_id)
-      return res.status(400).json({ success: false, message: "user_id não informado." });
+      return res
+        .status(400)
+        .json({ success: false, message: "user_id não informado." });
 
     if (!req.file || !req.file.path) {
       console.error("❌ Falha: arquivo não salvo pelo Multer.");
-      return res.status(400).json({ success: false, message: "Falha ao armazenar o arquivo." });
+      return res
+        .status(400)
+        .json({ success: false, message: "Falha ao armazenar o arquivo." });
     }
 
     const filePath = req.file.path;
     let fileContent = "";
 
-    // 🧩 Leitura do arquivo conforme tipo
+    // 🧩 Leitura do arquivo conforme tipo (para fallback IA)
     if (req.file.mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
@@ -106,42 +94,65 @@ app.post("/processar-extrato", upload.single("file"), async (req, res) => {
 
     console.log("✅ Arquivo lido com sucesso, tamanho:", fileContent.length);
 
-    // 🧠 IA interpreta o extrato
-    const prompt = `
-Extraia todas as transações do extrato abaixo e devolva SOMENTE JSON no formato:
-[
-  {"data":"DD/MM/AAAA ou DD/MM/AA","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"texto"}
-]
-Extrato:
-${fileContent.slice(0, 3000)}
-`;
-
-    const ai = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1,
-    });
-
-    let raw = (ai.choices?.[0]?.message?.content || "").trim();
-    console.log("🧠 IA respondeu:", raw.slice(0, 200));
-
-    const jsonStart = raw.indexOf("[");
-    const jsonEnd = raw.lastIndexOf("]");
-    if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
-
-    let extratoIA;
+    /* ============================================================
+    🧠 PARSER UNIVERSAL — Detecta banco e extrai dados sem IA
+    ============================================================ */
+    let extratoIA = [];
     try {
-      extratoIA = JSON.parse(raw);
+      const resultado = await parseExtratoUniversal(filePath, req.file.mimetype);
+      extratoIA = resultado.transacoes;
+      console.log(
+        `✅ Parser universal identificou ${extratoIA.length} transações (${resultado.banco}).`
+      );
     } catch (err) {
-      console.error("❌ Falha ao interpretar JSON:", err.message);
-      return res
-        .status(500)
-        .json({ success: false, message: "A IA não retornou JSON válido." });
+      console.error("⚠️ Falha no parser universal:", err);
+      extratoIA = [];
+    }
+
+    /* ============================================================
+    🤖 FALLBACK IA — Se o parser não encontrou nada
+    ============================================================ */
+    if (!extratoIA.length) {
+      console.log("🤖 Fallback IA — interpretando via OpenAI...");
+
+      const prompt = `
+      Extraia todas as transações do extrato abaixo e devolva SOMENTE JSON no formato:
+      [
+        {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"texto"}
+      ]
+      Extrato:
+      ${fileContent.slice(0, 3000)}
+      `;
+
+      const ai = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+      });
+
+      let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
+      console.log("🧠 IA respondeu:", raw.slice(0, 200));
+
+      const jsonStart = raw.indexOf("[");
+      const jsonEnd = raw.lastIndexOf("]");
+      if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+
+      try {
+        extratoIA = JSON.parse(raw);
+      } catch (err) {
+        console.error("❌ Falha ao interpretar JSON da IA:", err.message);
+        return res.status(500).json({
+          success: false,
+          message: "A IA não retornou JSON válido.",
+        });
+      }
     }
 
     console.log("💾 Transações extraídas:", extratoIA.length);
 
-    // 💾 Monta payload e insere no Supabase
+    /* ============================================================
+    💾 SALVAR NO SUPABASE
+    ============================================================ */
     const payload = extratoIA.map((t) => ({
       user_id,
       descricao: t.descricao || "",
@@ -153,7 +164,13 @@ ${fileContent.slice(0, 3000)}
     }));
 
     const { error } = await supabase.from("transacoes").insert(payload);
-    fs.unlinkSync(filePath);
+
+    // Limpa o arquivo temporário do Render
+    try {
+      fs.unlinkSync(filePath);
+    } catch (err) {
+      console.warn("⚠️ Não foi possível remover arquivo temporário:", err.message);
+    }
 
     if (error) {
       console.error("❌ Erro ao salvar no Supabase:", error);
@@ -164,7 +181,7 @@ ${fileContent.slice(0, 3000)}
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: `✅ ${payload.length} transações processadas com sucesso.`,
     });
@@ -177,6 +194,7 @@ ${fileContent.slice(0, 3000)}
     });
   }
 });
+
 
 /* ============================================================
 🔧 UTILITÁRIOS
