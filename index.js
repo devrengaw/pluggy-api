@@ -51,8 +51,6 @@ const upload = multer({ storage });
 /* ============================================================
 📤 PROCESSAR EXTRATO (Universal Parser + IA + SUPABASE)
 ============================================================ */
-import { parseExtratoUniversal } from "./services/pdfParserUniversal.js"; // ⬅️ importe no topo do arquivo
-
 app.post("/processar-extrato", upload.single("file"), async (req, res) => {
   try {
     console.log("📥 Recebendo arquivo:", req.file?.originalname);
