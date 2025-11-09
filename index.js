@@ -1,7 +1,7 @@
 // index.js — FinanceFlow completo com IA, Categorias, Aprendizado, Hub Familiar,
 // Teste de 30 dias (Plano PRO), Token Telegram, Upload IA e Realtime Supabase ↔ Telegram ↔ Horizons
 
-import express from "express";
+import { parseExtratoUniversal } from "./services/pdfParserUniversal.js";import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
@@ -14,7 +14,7 @@ import fs from "fs";
 import pdf from "pdf-parse";
 import XLSX from "xlsx";
 import path from "path";
-import { parseExtratoUniversal } from "./services/pdfParserUniversal.js";
+
 
 
 // ============================================================
