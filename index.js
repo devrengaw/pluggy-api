@@ -48,26 +48,27 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA única + categorização + fallback leve + datas corrigidas)
+🧠 ANALISAR EXTRATO (IA única + categorização + fallback leve)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
     const { user_id } = req.body;
     if (!req.file?.path)
-      return res.status(400).json({ success: false, message: "Arquivo não recebido." });
+      return res
+        .status(400)
+        .json({ success: false, message: "Arquivo não recebido." });
 
     const filePath = req.file.path;
     const mimetype = req.file.mimetype;
     let textoExtraido = "";
 
-    // ============================================================
     // 1️⃣ Ler arquivo (PDF, imagem, Excel, texto)
-    // ============================================================
     if (mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
       textoExtraido = pdfData.text;
 
+      // OCR apenas se veio quase nada de texto (PDF imagem)
       if (!textoExtraido || textoExtraido.trim().length < 300) {
         console.log("⚠️ PDF com pouco texto — aplicando OCR...");
         const { createWorker } = await import("tesseract.js");
@@ -84,7 +85,8 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
       await worker.terminate();
     } else if (
       mimetype === "application/vnd.ms-excel" ||
-      mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      mimetype ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ) {
       const workbook = XLSX.readFile(filePath);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -104,9 +106,7 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
 
     console.log(`📄 Texto extraído: ${textoExtraido.length} caracteres`);
 
-    // ============================================================
-    // 2️⃣ Detectar banco
-    // ============================================================
+    // 2️⃣ Detectar banco (pra deixar o prompt mais esperto)
     function detectarBanco(texto) {
       const lower = texto.toLowerCase();
       if (lower.includes("bradesco")) return "Bradesco";
@@ -122,67 +122,58 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     const bancoDetectado = detectarBanco(textoExtraido);
     console.log(`🏦 Banco detectado: ${bancoDetectado}`);
 
-    // ============================================================
-    // 3️⃣ Função de normalização de data
-    // ============================================================
-    function normalizarData(dataBruta) {
-      if (!dataBruta) return null;
-      try {
-        // remove caracteres extras
-        let dataLimpa = dataBruta.replace(/[^\d\/.\-]/g, "").trim();
-
-        // substitui . ou - por /
-        dataLimpa = dataLimpa.replace(/[.\-]/g, "/");
-
-        const partes = dataLimpa.split("/");
-        if (partes.length < 3) return null;
-
-        let [d, m, a] = partes.map((p) => p.padStart(2, "0"));
-
-        // se ano for 2 dígitos, corrige
-        if (a.length === 2) a = parseInt(a) < 50 ? "20" + a : "19" + a;
-
-        // se dia ou mês estiverem invertidos (ex: 2025/11/05)
-        if (parseInt(d) > 1900) {
-          // formato YYYY/MM/DD
-          const tmp = d;
-          d = a;
-          a = tmp;
-        }
-
-        const dataISO = new Date(`${a}-${m}-${d}`);
-        if (isNaN(dataISO)) return null;
-
-        return `${d}/${m}/${a}`;
-      } catch (err) {
-        return null;
-      }
-    }
-
-    // ============================================================
-    // 4️⃣ Prompt IA — extrato inteiro
-    // ============================================================
+    // 3️⃣ Prompt — IA lê o EXTRATO INTEIRO de uma vez
     const prompt = `
-Você é um analista financeiro especializado em leitura de extratos bancários brasileiros.
-Analise o extrato do banco **${bancoDetectado}** e extraia TODAS as transações reais (créditos e débitos),
-com data, descrição, valor, tipo e categoria.
+Você é um analista financeiro altamente especializado em leitura e categorização de extratos bancários brasileiros.
+Seu papel é ajudar o sistema FinanceFlow a importar as transações corretamente.
 
-Retorne SOMENTE JSON válido no formato:
+A seguir está o conteúdo bruto de um extrato do banco **${bancoDetectado}**.
+
+📌 Tarefa:
+Extraia TODAS as transações reais (créditos e débitos) e, para cada uma, devolva:
+- data (formato DD/MM/AAAA)
+- descricao (texto limpo, sem códigos desnecessários)
+- valor (número decimal, ex: 1234.56)
+- tipo ("entrada" ou "saida")
+- categoria (string em português, ex: "Alimentação", "Transporte", "Renda", "Outros")
+
+❗ Ignore:
+- Cabeçalhos: "Data", "Histórico", "Docto", "Crédito (R$)", "Débito (R$)", "Saldo (R$)" etc.
+- Linhas de "SALDO ANTERIOR", "SALDO ATUAL", "TOTAL DO MÊS" e similares
+- Linhas que sejam apenas saldo parcial
+- Números da coluna "Docto." ou códigos internos que NÃO são o valor da transação
+
+💰 Regras de valor:
+- Considere SEMPRE o último número com vírgula na linha como valor da transação.
+- Converta formatos brasileiros "1.234,56" → 1234.56.
+- Não devolva transações com valor zero.
+
+📥 Regras de tipo:
+- "entrada" quando for crédito, depósito, pix recebido, salário, transferência recebida, estorno
+- "saida" quando for pagamento, pix enviado, compra, débito, tarifa, saque, transferência enviada
+
+📂 Sugestão de categorias (escolha a melhor de acordo com a descrição):
+- "Alimentação" → mercado, supermercado, padaria, restaurante, lanchonete
+- "Transporte" → posto, combustível, uber, 99, transporte, pedágio
+- "Moradia" → aluguel, condomínio, energia, água, gás, luz
+- "Lazer" → netflix, spotify, cinema, bar, viagem, entretenimento
+- "Saúde" → farmácia, hospital, médico, exame, consulta
+- "Educação" → escola, faculdade, curso, mensalidade escolar
+- "Serviços" → celular, internet, telefone, assinatura, plano, serviços digitais
+- "Investimentos" → investimento, aplicação, corretora, cdb, renda fixa, bolsa
+- "Renda" → salário, pagamento, pix recebido, transferência recebida, renda extra
+- "Outros" → quando não se encaixar bem em nenhuma categoria acima
+
+🧾 Formato de resposta:
+Responda SOMENTE com JSON válido, neste formato exato:
 [
-  {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"texto"}
+  {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"texto"},
+  ...
 ]
 
-Certifique-se de:
-- Converter todas as datas para formato DD/MM/AAAA (mesmo se vierem em outro formato).
-- Usar o último número com vírgula como valor da transação.
-- Ignorar cabeçalhos, saldos, totais e linhas sem valor.
-- Classificar:
-  - "entrada" → crédito, pix recebido, depósito, estorno, salário
-  - "saida" → pagamento, pix enviado, compra, débito, tarifa, saque
-- Categorizar conforme a descrição:
-  - Alimentação, Transporte, Moradia, Lazer, Saúde, Educação, Serviços, Investimentos, Renda, Outros.
+NÃO adicione comentários, explicações ou texto fora do JSON.
 
-Extrato:
+📑 Conteúdo do extrato:
 """${textoExtraido.slice(0, 50000)}"""
 `;
 
@@ -203,77 +194,105 @@ Extrato:
     let transacoesIA = [];
     try {
       transacoesIA = JSON.parse(raw);
-    } catch {
+    } catch (err) {
+      console.warn("⚠️ Falha ao interpretar JSON da IA:", err.message);
       transacoesIA = [];
     }
 
-    console.log(`📊 IA (${bancoDetectado}) retornou ${transacoesIA.length} transações.`);
+    console.log(
+      `📊 IA (${bancoDetectado}) retornou ${transacoesIA.length} transações.`
+    );
 
-    // ============================================================
-    // 5️⃣ Fallback regex (caso IA falhe)
-    // ============================================================
+    // 4️⃣ Fallback REGEX — só se IA não trouxe NADA
     let transacoesFinal = transacoesIA;
 
     if (!transacoesIA.length) {
-      console.log("⚙️ IA retornou vazio — aplicando fallback regex...");
+      console.log("⚙️ IA retornou vazio — aplicando fallback regex simples...");
 
       const linhas = textoExtraido
         .split("\n")
-        .filter((l) => /\d{2}[\/.\-]\d{2}[\/.\-]\d{2,4}/.test(l));
+        .filter((l) => /\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/.test(l));
 
       const regexTransacoes = [];
 
       for (const linha of linhas) {
-        const dataMatch = linha.match(/\d{2}[\/.\-]\d{2}[\/.\-]\d{2,4}/);
-        const valorMatch = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
-        if (!dataMatch || !valorMatch) continue;
+        const dataMatch = linha.match(/\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/);
+        const valoresPossiveis = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
+        if (!dataMatch || !valoresPossiveis) continue;
 
-        const valorBruto = valorMatch[valorMatch.length - 1];
-        const valor = parseFloat(valorBruto.replace(/\./g, "").replace(",", ".").replace("-", ""));
-        if (isNaN(valor)) continue;
+        // último número com vírgula na linha = valor
+        const valorBruto = valoresPossiveis[valoresPossiveis.length - 1];
+        const valorNumerico = parseFloat(
+          valorBruto.replace(/\./g, "").replace(",", ".").replace("-", "")
+        );
+        if (isNaN(valorNumerico) || valorNumerico === 0) continue;
 
         const descricao = linha
           .replace(dataMatch[0], "")
           .replace(valorBruto, "")
+          .replace(/\s{2,}/g, " ")
           .trim();
 
-        const tipo = /cred|dep|receb|pix/i.test(linha) ? "entrada" : "saida";
+        // tipo heurístico
+        const lower = linha.toLowerCase();
+        const tipo =
+          /cred|dep|receb|salário|salario|pix recebido/i.test(linha) ||
+          /crédito/i.test(linha)
+            ? "entrada"
+            : "saida";
+
+        // categoria bem simples só pra não ficar vazio
+        let categoria = "Outros";
+        if (/mercado|supermercado|padaria|restaurante|lanchonete/i.test(lower))
+          categoria = "Alimentação";
+        else if (/posto|gasolina|combustível|uber|99/i.test(lower))
+          categoria = "Transporte";
+        else if (/aluguel|condomínio|energia|água|luz|gás/i.test(lower))
+          categoria = "Moradia";
+        else if (/netflix|spotify|cinema|bar|viagem/i.test(lower))
+          categoria = "Lazer";
+        else if (/farmácia|hospital|médico|exame|consulta/i.test(lower))
+          categoria = "Saúde";
+        else if (/escola|faculdade|curso|mensalidade/i.test(lower))
+          categoria = "Educação";
+        else if (/celular|internet|telefone|plano|assinatura/i.test(lower))
+          categoria = "Serviços";
+        else if (/investimento|aplicação|corretora|cdb/i.test(lower))
+          categoria = "Investimentos";
+        else if (/salário|salario|pix recebido|depósito|deposito/i.test(lower))
+          categoria = "Renda";
 
         regexTransacoes.push({
-          data: normalizarData(dataMatch[0]),
+          data: dataMatch[0],
           descricao,
-          valor,
+          valor: valorNumerico,
           tipo,
-          categoria: tipo === "entrada" ? "Renda" : "Outros",
+          categoria,
         });
       }
 
+      console.log(
+        `📊 Fallback regex identificou ${regexTransacoes.length} transações.`
+      );
       transacoesFinal = regexTransacoes;
-      console.log(`📊 Fallback regex detectou ${regexTransacoes.length} transações.`);
     }
 
-    // ============================================================
-    // 6️⃣ Normalização e deduplicação final
-    // ============================================================
-    const unicas = (transacoesFinal || [])
-      .map((t) => ({
-        ...t,
-        data: normalizarData(t.data),
-      }))
-      .filter(
-        (t, idx, arr) =>
-          t.data &&
-          !isNaN(t.valor) &&
-          arr.findIndex(
-            (x) =>
-              x.data === t.data &&
-              x.descricao?.trim().toLowerCase() ===
-                t.descricao?.trim().toLowerCase() &&
-              Number(x.valor) === Number(t.valor)
-          ) === idx
-      );
+    // 5️⃣ Limpar, normalizar e deduplicar
+    const unicas = (transacoesFinal || []).filter(
+      (t, idx, arr) =>
+        t.data &&
+        !isNaN(Number(t.valor)) &&
+        arr.findIndex(
+          (x) =>
+            x.data === t.data &&
+            (x.descricao || "").trim() === (t.descricao || "").trim() &&
+            Number(x.valor) === Number(t.valor)
+        ) === idx
+    );
 
-    console.log(`✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`);
+    console.log(
+      `✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`
+    );
 
     return res.json({
       success: true,
