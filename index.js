@@ -312,41 +312,179 @@ NÃO adicione comentários, explicações ou texto fora do JSON.
 });
 
 /* ============================================================
-💾 CONFIRMAR EXTRATO — salvar aprovações no Supabase
+💾 CONFIRMAR EXTRATO (importação aprovada → Supabase + Telegram personalizado)
 ============================================================ */
 app.post("/confirmar-extrato", async (req, res) => {
   try {
     const { user_id, transacoes } = req.body;
 
-    if (!user_id || !Array.isArray(transacoes))
-      return res.status(400).json({ success: false, message: "Dados inválidos." });
+    if (!user_id || !Array.isArray(transacoes) || transacoes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "user_id ou lista de transações inválida.",
+      });
+    }
 
-    const payload = transacoes.map((t) => ({
-      user_id,
-      descricao: t.descricao || "",
-      valor: Number(t.valor) || 0,
-      tipo: t.tipo === "entrada" ? "entrada" : "saida",
-      categoria: t.categoria || null,
-      data: normalizarData(t.data),
-      criado_em: new Date(),
-    }));
+    console.log(`📥 Recebendo ${transacoes.length} transações aprovadas do usuário ${user_id}`);
 
-    const { error } = await supabase.from("transacoes").insert(payload);
-    if (error) throw error;
+    // ============================================================
+    // 🗓️ Função para normalizar datas (DD/MM/AAAA → YYYY-MM-DD)
+    // ============================================================
+    function normalizarData(dataBruta) {
+      if (!dataBruta) return new Date().toISOString().split("T")[0];
+      try {
+        let dataLimpa = dataBruta.replace(/[^\d\/.\-]/g, "").trim();
+        dataLimpa = dataLimpa.replace(/[.\-]/g, "/");
+        const partes = dataLimpa.split("/");
+        if (partes.length !== 3) return new Date().toISOString().split("T")[0];
+        let [d, m, a] = partes.map((p) => p.padStart(2, "0"));
+        if (a.length === 2) a = parseInt(a) < 50 ? "20" + a : "19" + a;
+        return `${a}-${m}-${d}`;
+      } catch {
+        return new Date().toISOString().split("T")[0];
+      }
+    }
 
+    // ============================================================
+    // 📊 Buscar transações existentes (evita duplicadas)
+    // ============================================================
+    const { data: existentes, error: fetchError } = await supabase
+      .from("transacoes")
+      .select("data, descricao, valor, user_id")
+      .eq("user_id", user_id);
+
+    if (fetchError)
+      console.error("⚠️ Erro ao buscar transações existentes:", fetchError);
+
+    const jaExistentes = new Set(
+      (existentes || []).map(
+        (t) =>
+          `${t.data}|${t.descricao?.trim().toLowerCase()}|${Number(t.valor).toFixed(2)}`
+      )
+    );
+
+    // ============================================================
+    // 💾 Montar payload e verificar duplicadas
+    // ============================================================
+    const novasTransacoes = [];
+    const duplicadas = [];
+
+    for (const t of transacoes) {
+      const dataISO = normalizarData(t.data);
+      const chave = `${dataISO}|${(t.descricao || "").trim().toLowerCase()}|${Number(t.valor).toFixed(2)}`;
+
+      if (jaExistentes.has(chave)) {
+        duplicadas.push(t);
+        continue;
+      }
+
+      novasTransacoes.push({
+        user_id,
+        descricao: t.descricao?.trim() || "Transação sem descrição",
+        valor: Number(t.valor) || 0,
+        tipo: t.tipo === "entrada" ? "entrada" : "saida",
+        categoria: t.categoria || "Outros",
+        data: dataISO,
+        criado_em: new Date(),
+      });
+    }
+
+    console.log(`💾 Novas: ${novasTransacoes.length} | Duplicadas ignoradas: ${duplicadas.length}`);
+
+    // ============================================================
+    // 📥 Inserir no Supabase
+    // ============================================================
+    if (novasTransacoes.length > 0) {
+      const { error: insertError } = await supabase
+        .from("transacoes")
+        .insert(novasTransacoes);
+
+      if (insertError) {
+        console.error("❌ Erro ao salvar transações:", insertError);
+        return res.status(500).json({
+          success: false,
+          message: "Erro ao salvar transações no banco.",
+          error: insertError.message,
+        });
+      }
+    }
+
+    // ============================================================
+    // 👤 Buscar nome do usuário e chat_id do Telegram
+    // ============================================================
+    const { data: userData } = await supabase
+      .from("users")
+      .select("first_name, name, email")
+      .eq("id", user_id)
+      .maybeSingle();
+
+    const nomeUsuario =
+      userData?.first_name ||
+      userData?.name?.split(" ")[0] ||
+      "Usuário";
+
+    const { data: telegramData } = await supabase
+      .from("telegram_users")
+      .select("chat_id")
+      .eq("user_id", user_id)
+      .maybeSingle();
+
+    // ============================================================
+    // 💬 Enviar mensagem no Telegram (se vinculado)
+    // ============================================================
+    if (telegramData?.chat_id) {
+      const chatId = telegramData.chat_id;
+      const texto = [
+        `👋 Olá, *${nomeUsuario}*!`,
+        "",
+        "✅ *FinanceFlow — Importação concluída!*",
+        "",
+        `📊 Foram importadas *${novasTransacoes.length}* transações do seu extrato.`,
+        duplicadas.length
+          ? `⚠️ ${duplicadas.length} transações duplicadas foram ignoradas.`
+          : "",
+        "",
+        "💰 Seus lançamentos já estão disponíveis na *régua de gastos*.",
+        "",
+        "📆 Cada transação foi adicionada na *data original do extrato.*",
+        "",
+        "✨ Obrigado por usar o FinanceFlow!",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      try {
+        await sendMessage(chatId, texto);
+        console.log(`📨 Notificação Telegram enviada para ${chatId}`);
+      } catch (err) {
+        console.warn("⚠️ Falha ao enviar notificação Telegram:", err.message);
+      }
+    } else {
+      console.log("ℹ️ Nenhum chat Telegram vinculado ao usuário.");
+    }
+
+    // ============================================================
+    // 🔁 Retorno final para o frontend
+    // ============================================================
     return res.json({
       success: true,
-      message: `✅ ${payload.length} transações salvas com sucesso.`,
+      message: "Importação concluída com sucesso.",
+      inseridas: novasTransacoes.length,
+      ignoradas: duplicadas.length,
+      total_recebidas: transacoes.length,
+      telegram_notificado: !!telegramData?.chat_id,
+      nome_usuario: nomeUsuario,
     });
   } catch (err) {
-    console.error("💥 Erro ao confirmar extrato:", err);
-    res.status(500).json({
+    console.error("💥 Erro em /confirmar-extrato:", err);
+    return res.status(500).json({
       success: false,
-      message: "Erro ao confirmar extrato.",
+      message: "Erro interno ao confirmar extrato.",
       error: err.message,
     });
   }
 });
+
 
 // ============================================================
 // 🧠 Função auxiliar — normaliza data DD/MM/AA → YYYY-MM-DD
