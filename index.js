@@ -48,7 +48,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================================================
-🧠 ANALISAR EXTRATO (IA + OCR + Categorias + Fallback universal)
+🧠 ANALISAR EXTRATO (IA única + categorização + fallback leve + datas corrigidas)
 ============================================================ */
 app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
   try {
@@ -60,17 +60,16 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     const mimetype = req.file.mimetype;
     let textoExtraido = "";
 
-    /* ============================================================
-    1️⃣ LEITURA DO ARQUIVO (PDF, Imagem, Excel ou Texto)
-    ============================================================ */
+    // ============================================================
+    // 1️⃣ Ler arquivo (PDF, imagem, Excel, texto)
+    // ============================================================
     if (mimetype === "application/pdf") {
       const buffer = fs.readFileSync(filePath);
       const pdfData = await pdf(buffer);
       textoExtraido = pdfData.text;
 
-      // OCR automático se o texto for insuficiente
-      if (!textoExtraido || textoExtraido.trim().length < 1000) {
-        console.log("⚠️ Texto insuficiente — aplicando OCR automático...");
+      if (!textoExtraido || textoExtraido.trim().length < 300) {
+        console.log("⚠️ PDF com pouco texto — aplicando OCR...");
         const { createWorker } = await import("tesseract.js");
         const worker = await createWorker("por");
         const { data } = await worker.recognize(buffer);
@@ -95,19 +94,19 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     }
 
     fs.unlinkSync(filePath);
+
     if (!textoExtraido || textoExtraido.trim().length < 50) {
       return res.status(400).json({
         success: false,
-        message:
-          "Não foi possível ler o extrato. Verifique se o arquivo está legível.",
+        message: "Não foi possível ler o extrato. Verifique o arquivo.",
       });
     }
 
-    console.log(`📄 Texto extraído com ${textoExtraido.length} caracteres`);
+    console.log(`📄 Texto extraído: ${textoExtraido.length} caracteres`);
 
-    /* ============================================================
-    2️⃣ DETECÇÃO DO BANCO (para adaptar o prompt)
-    ============================================================ */
+    // ============================================================
+    // 2️⃣ Detectar banco
+    // ============================================================
     function detectarBanco(texto) {
       const lower = texto.toLowerCase();
       if (lower.includes("bradesco")) return "Bradesco";
@@ -123,154 +122,159 @@ app.post("/analisar-extrato", upload.single("file"), async (req, res) => {
     const bancoDetectado = detectarBanco(textoExtraido);
     console.log(`🏦 Banco detectado: ${bancoDetectado}`);
 
-    /* ============================================================
-    3️⃣ DIVISÃO EM BLOCOS (para extratos longos)
-    ============================================================ */
-    const blocos = [];
-    for (let i = 0; i < textoExtraido.length; i += 15000) {
-      blocos.push(textoExtraido.slice(i, i + 15000));
+    // ============================================================
+    // 3️⃣ Função de normalização de data
+    // ============================================================
+    function normalizarData(dataBruta) {
+      if (!dataBruta) return null;
+      try {
+        // remove caracteres extras
+        let dataLimpa = dataBruta.replace(/[^\d\/.\-]/g, "").trim();
+
+        // substitui . ou - por /
+        dataLimpa = dataLimpa.replace(/[.\-]/g, "/");
+
+        const partes = dataLimpa.split("/");
+        if (partes.length < 3) return null;
+
+        let [d, m, a] = partes.map((p) => p.padStart(2, "0"));
+
+        // se ano for 2 dígitos, corrige
+        if (a.length === 2) a = parseInt(a) < 50 ? "20" + a : "19" + a;
+
+        // se dia ou mês estiverem invertidos (ex: 2025/11/05)
+        if (parseInt(d) > 1900) {
+          // formato YYYY/MM/DD
+          const tmp = d;
+          d = a;
+          a = tmp;
+        }
+
+        const dataISO = new Date(`${a}-${m}-${d}`);
+        if (isNaN(dataISO)) return null;
+
+        return `${d}/${m}/${a}`;
+      } catch (err) {
+        return null;
+      }
     }
-    console.log(`🧩 Extrato dividido em ${blocos.length} blocos.`);
 
-    /* ============================================================
-    4️⃣ PROCESSAMENTO COM IA — BLOCO A BLOCO (com categorias)
-    ============================================================ */
-    let transacoesIA = [];
+    // ============================================================
+    // 4️⃣ Prompt IA — extrato inteiro
+    // ============================================================
+    const prompt = `
+Você é um analista financeiro especializado em leitura de extratos bancários brasileiros.
+Analise o extrato do banco **${bancoDetectado}** e extraia TODAS as transações reais (créditos e débitos),
+com data, descrição, valor, tipo e categoria.
 
-    for (let i = 0; i < blocos.length; i++) {
-      console.log(`🤖 IA analisando bloco ${i + 1}/${blocos.length}...`);
-
-      const prompt = `
-Você é um analista financeiro altamente especializado em leitura e categorização de extratos bancários brasileiros.
-A seguir está o conteúdo bruto de um extrato do banco **${bancoDetectado}**.
-
-Extraia TODAS as transações reais (créditos e débitos), e para cada uma determine:
-- Data (DD/MM/AAAA)
-- Descrição
-- Valor (decimal: 1234.56)
-- Tipo ("entrada" ou "saida")
-- Categoria adequada (baseada na descrição)
-
-⚙️ Regras:
-- Ignore cabeçalhos ("Data", "Histórico", "Docto", "Valor", etc.)
-- Ignore totais e saldos ("Saldo Anterior", "Saldo Atual", "Total do Mês")
-- Ignore colunas "Docto" e "Saldo" (não são valores)
-- O valor correto é sempre o último número com vírgula na linha.
-- Classifique:
-  - "entrada" → crédito, depósito, pix recebido, estorno, salário, transferência recebida
-  - "saida" → pagamento, pix enviado, compra, débito, tarifa, saque, transferência enviada
-- Categorias:
-  - "Alimentação 🍽️" → mercado, supermercado, padaria, restaurante
-  - "Transporte 🚗" → posto, combustível, uber, 99, locadora
-  - "Moradia 🏠" → aluguel, condomínio, energia, água, gás
-  - "Lazer 🎬" → netflix, spotify, cinema, viagem, bar
-  - "Saúde ❤️" → farmácia, hospital, médico, consulta
-  - "Educação 🎓" → escola, faculdade, curso, mensalidade
-  - "Serviços 📱" → celular, internet, telefone, assinatura, plano
-  - "Investimentos 📈" → investimento, aplicação, corretora, cdb
-  - "Renda 💰" → para todas as entradas (salário, pix recebido, depósito)
-  - "Outros 💼" → quando não se encaixar
-- Mantenha as datas no formato DD/MM/AAAA.
-- Mantenha apenas JSON válido, sem texto adicional.
-
-Responda SOMENTE com JSON:
+Retorne SOMENTE JSON válido no formato:
 [
   {"data":"DD/MM/AAAA","descricao":"texto","valor":123.45,"tipo":"entrada|saida","categoria":"texto"}
 ]
 
+Certifique-se de:
+- Converter todas as datas para formato DD/MM/AAAA (mesmo se vierem em outro formato).
+- Usar o último número com vírgula como valor da transação.
+- Ignorar cabeçalhos, saldos, totais e linhas sem valor.
+- Classificar:
+  - "entrada" → crédito, pix recebido, depósito, estorno, salário
+  - "saida" → pagamento, pix enviado, compra, débito, tarifa, saque
+- Categorizar conforme a descrição:
+  - Alimentação, Transporte, Moradia, Lazer, Saúde, Educação, Serviços, Investimentos, Renda, Outros.
+
 Extrato:
-"""${blocos[i]}"""
+"""${textoExtraido.slice(0, 50000)}"""
 `;
 
-      const ai = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0,
-      });
+    console.log("🤖 Enviando extrato completo para IA...");
 
-      let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
-      const jsonStart = raw.indexOf("[");
-      const jsonEnd = raw.lastIndexOf("]");
-      if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0,
+      top_p: 1,
+    });
 
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) transacoesIA.push(...parsed);
-      } catch (err) {
-        console.warn(`⚠️ Erro ao interpretar bloco ${i + 1}:`, err.message);
+    let raw = ai.choices?.[0]?.message?.content?.trim() || "[]";
+    const jsonStart = raw.indexOf("[");
+    const jsonEnd = raw.lastIndexOf("]");
+    if (jsonStart >= 0 && jsonEnd >= 0) raw = raw.slice(jsonStart, jsonEnd + 1);
+
+    let transacoesIA = [];
+    try {
+      transacoesIA = JSON.parse(raw);
+    } catch {
+      transacoesIA = [];
+    }
+
+    console.log(`📊 IA (${bancoDetectado}) retornou ${transacoesIA.length} transações.`);
+
+    // ============================================================
+    // 5️⃣ Fallback regex (caso IA falhe)
+    // ============================================================
+    let transacoesFinal = transacoesIA;
+
+    if (!transacoesIA.length) {
+      console.log("⚙️ IA retornou vazio — aplicando fallback regex...");
+
+      const linhas = textoExtraido
+        .split("\n")
+        .filter((l) => /\d{2}[\/.\-]\d{2}[\/.\-]\d{2,4}/.test(l));
+
+      const regexTransacoes = [];
+
+      for (const linha of linhas) {
+        const dataMatch = linha.match(/\d{2}[\/.\-]\d{2}[\/.\-]\d{2,4}/);
+        const valorMatch = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
+        if (!dataMatch || !valorMatch) continue;
+
+        const valorBruto = valorMatch[valorMatch.length - 1];
+        const valor = parseFloat(valorBruto.replace(/\./g, "").replace(",", ".").replace("-", ""));
+        if (isNaN(valor)) continue;
+
+        const descricao = linha
+          .replace(dataMatch[0], "")
+          .replace(valorBruto, "")
+          .trim();
+
+        const tipo = /cred|dep|receb|pix/i.test(linha) ? "entrada" : "saida";
+
+        regexTransacoes.push({
+          data: normalizarData(dataMatch[0]),
+          descricao,
+          valor,
+          tipo,
+          categoria: tipo === "entrada" ? "Renda" : "Outros",
+        });
       }
+
+      transacoesFinal = regexTransacoes;
+      console.log(`📊 Fallback regex detectou ${regexTransacoes.length} transações.`);
     }
 
-    console.log(
-      `📊 IA (${bancoDetectado}) detectou ${transacoesIA.length} transações.`
-    );
-
-    /* ============================================================
-    5️⃣ FALLBACK LOCAL (Regex de segurança)
-    ============================================================ */
-    const linhas = textoExtraido
-      .split("\n")
-      .filter((l) => /\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/.test(l));
-
-    const transacoesRegex = [];
-
-    for (const linha of linhas) {
-      const dataMatch = linha.match(/\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/);
-      const valoresPossiveis = linha.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
-      if (!dataMatch || !valoresPossiveis) continue;
-
-      const valorBruto = valoresPossiveis[valoresPossiveis.length - 1];
-      const partes = valorBruto.split(",");
-      if (partes[0].length > 8 || !/,/.test(valorBruto)) continue;
-
-      const valorNumerico = parseFloat(
-        valorBruto.replace(/\./g, "").replace(",", ".").replace("-", "")
+    // ============================================================
+    // 6️⃣ Normalização e deduplicação final
+    // ============================================================
+    const unicas = (transacoesFinal || [])
+      .map((t) => ({
+        ...t,
+        data: normalizarData(t.data),
+      }))
+      .filter(
+        (t, idx, arr) =>
+          t.data &&
+          !isNaN(t.valor) &&
+          arr.findIndex(
+            (x) =>
+              x.data === t.data &&
+              x.descricao?.trim().toLowerCase() ===
+                t.descricao?.trim().toLowerCase() &&
+              Number(x.valor) === Number(t.valor)
+          ) === idx
       );
-      if (isNaN(valorNumerico) || valorNumerico === 0) continue;
 
-      const descricao = linha
-        .replace(dataMatch[0], "")
-        .replace(valorBruto, "")
-        .replace(/\s{2,}/g, " ")
-        .trim();
+    console.log(`✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`);
 
-      transacoesRegex.push({
-        data: dataMatch[0],
-        descricao,
-        valor: valorNumerico,
-        tipo: /cred|dep|receb|pix/i.test(linha) ? "entrada" : "saida",
-        categoria: /cred|dep|receb|pix/i.test(linha)
-          ? "Renda 💰"
-          : "Outros 💼",
-      });
-    }
-
-    console.log(`📊 Fallback local detectou ${transacoesRegex.length} transações.`);
-
-    /* ============================================================
-    6️⃣ COMBINAÇÃO, LIMPEZA E DEDUPLICAÇÃO FINAL
-    ============================================================ */
-    const combinadas = [...transacoesIA, ...transacoesRegex];
-
-    const unicas = combinadas.filter(
-      (t, idx, arr) =>
-        t.data &&
-        !isNaN(t.valor) &&
-        arr.findIndex(
-          (x) =>
-            x.data === t.data &&
-            x.descricao === t.descricao &&
-            Number(x.valor) === Number(t.valor)
-        ) === idx
-    );
-
-    console.log(
-      `✅ Total final consolidado: ${unicas.length} transações (${bancoDetectado}).`
-    );
-
-    /* ============================================================
-    7️⃣ RETORNO FINAL
-    ============================================================ */
     return res.json({
       success: true,
       user_id,
@@ -279,7 +283,7 @@ Extrato:
       transacoes: unicas,
     });
   } catch (err) {
-    console.error("💥 Erro IA:", err);
+    console.error("💥 Erro em /analisar-extrato:", err);
     res.status(500).json({
       success: false,
       message: "Erro interno ao analisar extrato.",
