@@ -1331,6 +1331,77 @@ ${textoExtraido}
     }
   }
 
+    // 🎤 ÁUDIO — lançar transação por voz
+  if (msg.voice) {
+    try {
+      const fileId = msg.voice.file_id;
+
+      // 1️⃣ Buscar arquivo no Telegram
+      const tgResp = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`
+      );
+      const fileInfo = await tgResp.json();
+
+      if (!fileInfo?.ok) {
+        await sendMessage(chatId, "⚠️ Não consegui baixar o áudio. Tente novamente.");
+        return res.sendStatus(200);
+      }
+
+      const filePath = fileInfo.result.file_path;
+      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+
+      await sendMessage(chatId, "🎙️ Recebi seu áudio! Estou transcrevendo...");
+
+      // 2️⃣ Baixar o áudio como buffer
+      const audioResp = await fetch(fileUrl);
+      const audioBuffer = Buffer.from(await audioResp.arrayBuffer());
+
+      // 3️⃣ Transcrever usando Whisper
+      const transcription = await openai.audio.transcriptions.create({
+        file: audioBuffer,
+        model: "gpt-4o-mini-tts",
+        language: "pt"
+      });
+
+      const texto = transcription.text.trim();
+      console.log("🎧 Transcrição:", texto);
+
+      await sendMessage(chatId, `📝 *Transcrição:* ${texto}`);
+
+      // 4️⃣ Interpretar como transação (mesmo fluxo do texto)
+      const user = await buscarUsuario(chatId);
+      if (!user) {
+        await sendMessage(chatId, "🔒 Conta não vinculada. Use `/vincular TLG-XXXXXX`.");
+        return res.sendStatus(200);
+      }
+
+      const interpret = await interpretarMensagem(texto);
+
+      if (!interpret?.acao || !interpret.valor) {
+        await sendMessage(chatId, "❌ Não consegui entender o valor ou tipo da transação.");
+        return res.sendStatus(200);
+      }
+
+      // 5️⃣ Registrar no sistema
+      await registrarTransacao({
+        tipo: interpret.acao,
+        valor: interpret.valor,
+        descricao: interpret.descricao || texto,
+        chatId,
+        userId: user.user_id,
+        familyId: user.family_id,
+        perguntarEssencial: user.perguntar_essencial,
+      });
+
+      return res.sendStatus(200);
+
+    } catch (err) {
+      console.error("❌ Erro ao processar áudio:", err);
+      await sendMessage(chatId, "⚠️ Erro ao analisar o áudio.");
+      return res.sendStatus(200);
+    }
+  }
+
   // Comandos básicos
   if (text?.toLowerCase() === "/start") {
     await sendMessage(
