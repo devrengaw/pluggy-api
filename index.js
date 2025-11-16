@@ -1109,6 +1109,39 @@ app.post("/registrar-compra-credito", async (req, res) => {
 });
 
 /* ============================================================
+📂 LISTAR CATEGORIAS (App sincronizado com Telegram)
+============================================================ */
+app.get("/categorias", async (req, res) => {
+  const { user_id } = req.query;
+
+  if (!user_id)
+    return res.status(400).json({
+      success: false,
+      message: "user_id não informado.",
+    });
+
+  const { data, error } = await supabase
+    .from("categorias")
+    .select("*")
+    .or(`user_id.eq.${user_id},padrao.eq.true`)
+    .order("nome", { ascending: true });
+
+  if (error) {
+    console.error("❌ Erro ao listar categorias:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Erro ao listar categorias.",
+    });
+  }
+
+  return res.json({
+    success: true,
+    categorias: data,
+  });
+});
+
+
+/* ============================================================
 🤖 WEBHOOK TELEGRAM (com /start, /menu, /help e leitura de foto)
 ============================================================ */
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
@@ -1242,6 +1275,67 @@ if (data.startsWith("ess_")) {
   // ==============================
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
+// ------------------------------------------------------------
+// 📂 /categorias
+// ------------------------------------------------------------
+if (text && text.toLowerCase() === "/categorias") {
+  const user = await buscarUsuario(chatId);
+  if (!user) {
+    await sendMessage(chatId, "🔒 Conta não vinculada.");
+    return res.sendStatus(200);
+  }
+
+  const { data: cats } = await supabase
+    .from("categorias")
+    .select("*")
+    .or(`user_id.eq.${user.user_id},padrao.eq.true`)
+    .order("nome");
+
+  if (!cats?.length) {
+    await sendMessage(chatId, "📭 Você ainda não tem categorias.");
+    return res.sendStatus(200);
+  }
+
+  let txt = "📂 *Suas categorias:*\n\n";
+  cats.forEach(c => (txt += `• ${c.nome}\n`));
+
+  await sendMessage(chatId, txt);
+  return res.sendStatus(200);
+}
+
+// ------------------------------------------------------------
+// ➕ /addcategoria Nome
+// ------------------------------------------------------------
+if (text && text.toLowerCase().startsWith("/addcategoria")) {
+  const user = await buscarUsuario(chatId);
+  if (!user) {
+    await sendMessage(chatId, "🔒 Conta não vinculada.");
+    return res.sendStatus(200);
+  }
+
+  const nome = text.replace("/addcategoria", "").trim();
+
+  if (!nome.length) {
+    await sendMessage(chatId, "Use: `/addcategoria NomeDaCategoria`");
+    return res.sendStatus(200);
+  }
+
+  const { error } = await supabase
+    .from("categorias")
+    .insert({
+      user_id: user.user_id,
+      nome,
+      tipo: "saida",
+    });
+
+  if (error) {
+    await sendMessage(chatId, "⚠️ Erro ao criar categoria.");
+  } else {
+    await sendMessage(chatId, `✨ Categoria *${nome}* criada com sucesso!`);
+  }
+
+  return res.sendStatus(200);
+}
 
   // 📸 FOTO (nota fiscal)
   if (msg.photo && msg.photo.length > 0) {
@@ -1640,6 +1734,14 @@ supabaseRealtime
   .channel("transacoes_updates")
   .on("postgres_changes", { event: "*", schema: "public", table: "transacoes" }, async (payload) => {
     console.log("📡 Mudança detectada em transações:", payload.eventType, payload.new);
+  })
+  .subscribe();
+
+// 📡 Realtime das categorias (para sincronizar Telegram ↔ App ↔ Supabase)
+supabaseRealtime
+  .channel("categorias_updates")
+  .on("postgres_changes", { event: "*", schema: "public", table: "categorias" }, async (payload) => {
+    console.log("📡 Mudança detectada em categorias:", payload.eventType, payload.new);
   })
   .subscribe();
 
